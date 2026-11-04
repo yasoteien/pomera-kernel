@@ -1,0 +1,30 @@
+From 973e5d532619be51d1164c42521f7b9ab2b511d0 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 16:50:28 +0900
+Subject: [PATCH 46/46] pomera_dm250: autoboot countdown 3 seconds
+
+One second was too short to stop it with the Pomera keyboard (to type
+emmc and start the built-in firmware).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ configs/pomera_dm250_defconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/configs/pomera_dm250_defconfig b/configs/pomera_dm250_defconfig
+index 4e60689b67..869b26c37c 100644
+--- a/configs/pomera_dm250_defconfig
++++ b/configs/pomera_dm250_defconfig
+@@ -12,7 +12,7 @@ CONFIG_SYS_LOAD_ADDR=0x60800800
+ CONFIG_DEBUG_UART_BASE=0x20064000
+ CONFIG_DEBUG_UART_CLOCK=24000000
+ CONFIG_DEBUG_UART=y
+-CONFIG_BOOTDELAY=1
++CONFIG_BOOTDELAY=3
+ CONFIG_USE_BOOTARGS=y
+ CONFIG_BOOTARGS="console=ttyS1,115200n8 console=tty1 root=/dev/mmcblk1p2 rootwait quiet systemd.show_status=yes"
+ CONFIG_BOOTCOMMAND="sd"
+-- 
+2.47.3
+

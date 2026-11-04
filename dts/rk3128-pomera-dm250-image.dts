@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * KING JIM Pomera DM250 (RK3128) — 作者の Debian 11 イメージの RSCE に入っている DTB
+ * KING JIM Pomera DM250 (RK3128) — DM250 用 Debian 13 イメージの RSCE に入っている DTB
  *
  * (C) Copyright 2017 Rockchip Electronics Co., Ltd（rk3128.dtsi に由来する部分）
  * Copyright (C) 2026 yasoteien（この頭書きと、DTB を DTS に戻した形）
  *
  * 出どころ:
- *   - DM250 用 Debian 11 イメージ（https://www.ekesete.net/log/?p=9565）の
- *     RSCE 領域（項目 rk-kernel.dtb）にある DTB。sha256
+ *   - DM250 用 Debian 13 イメージ（https://www.ekesete.net/log/?p=9565 で配布の
+ *     sd_dm250.img_20261010.zip の sd_dm250.img）の、24MiB の位置の RSCE 領域
+ *     （項目 rk-kernel.dtb）にある DTB。sha256
  *     bd97037c2e7eddb99a9a4042e1ffc716402c5199450aafbe3a5bacf6ef8b4c48（32301 バイト）。
  *   - その DTB は https://github.com/jcs/linux-dm250 の pomera-dm250.dts
  *     （(GPL-2.0+ OR MIT)）と本家の rk3128.dtsi（GPL-2.0+）から組まれた物。
@@ -15,9 +16,9 @@
  *   - dtc 1.7.2 で DTB から戻した（dtc -I dtb -O dts）。phandle は数値のまま。
  *
  * 組み方（元の DTB と 1 バイトも違わない物が出る）:
- *   dtc -q -b 0 -I dts -O dtb -o rk3128-pomera-dm250-author.dtb rk3128-pomera-dm250-author.dts
+ *   dtc -q -b 0 -I dts -O dtb -o rk3128-pomera-dm250-image.dtb rk3128-pomera-dm250-image.dts
  *
- * このファイルは作者の DTB そのままで、直しは入れていない。今使っている DTB は
+ * このファイルはイメージの DTB そのままで、直しは入れていない。今使っている DTB は
  * mk_rsce.sh が、これに mk_leds.sh（RK818 の INT の結線、充電 LED）と
  * mk_panel.sh（パネルの寸法）の直しを当てて作る。
  */

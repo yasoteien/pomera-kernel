@@ -1,0 +1,42 @@
+From 4f6e61f661cc29279c53cad9c716d6369ab67e91 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:27:35 +0900
+Subject: [PATCH 42/46] pomera_dm250: panel size 154x86 mm (7.0 inch), was
+ 223x125
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts b/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
+index b7178cb3d0..64f4ca0d67 100644
+--- a/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
++++ b/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
+@@ -5,6 +5,8 @@
+  *    vendor 3.10 DT uses lvds-format 2 = 8bit format 3, the author's 6.18
+  *    kernel DT uses jeida-18; RK3128 TRM LVDS 23.6.1, PX3 SE TRM Table 15-2)
+  *  - backlight pwms polarity 1 -> 0 (normal, as in the kernel DTs)
++ *  - panel width-mm/height-mm 223x125 -> 154x86 (DM250 is 7.0-inch
++ *    1024x600; 154.21x85.92 mm is the usual 7-inch WSVGA active area)
+  */
+ /dts-v1/;
+ 
+@@ -1492,11 +1494,11 @@
+ 		backlight = <0x4e>;
+ 		data-mapping = "jeida-18";
+ 		enable-gpios = <0x42 0x18 0x00>;
+-		height-mm = <0x7d>;
++		height-mm = <0x56>;
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <0x4f>;
+ 		power-supply = <0x50>;
+-		width-mm = <0xdf>;
++		width-mm = <0x9a>;
+ 
+ 		panel-timing {
+ 			clock-frequency = <0x30d4000>;
+-- 
+2.47.3
+

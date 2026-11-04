@@ -21,3 +21,4 @@
 0021-clk-disable-unused-after-hibernation.patch
 0022-clk-rk3128-restore-clksel-after-hibernation.patch
 0023-rk818-hub-limit-checks.patch
+0024-rk818-full-on-charge-termination.patch

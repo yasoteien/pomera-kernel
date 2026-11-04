@@ -1,0 +1,1022 @@
+From ea46542d6fb2cf7be43dde1550340d660c7eaf54 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:27:33 +0900
+Subject: [PATCH 35/46] pomera_dm250: board code rebuilt from the author binary
+
+sd/emmc commands, RK818 setup, KRNL/RSCE loading, Bluetooth address
+from eMMC sys_info, hibernation resume= handling and the legacy eMMC
+U-Boot loader/patcher. 11 of 13 functions match the author machine
+code instruction for instruction; the other two differ only in
+register allocation and block order.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ board/kingjim/pomera_dm250/Makefile       |   2 +-
+ board/kingjim/pomera_dm250/dm250.h        |  31 ++
+ board/kingjim/pomera_dm250/dm250_boot.c   | 140 ++++++++
+ board/kingjim/pomera_dm250/dm250_bt.c     | 328 +++++++++++++++++++
+ board/kingjim/pomera_dm250/dm250_legacy.c |  67 ++++
+ board/kingjim/pomera_dm250/pomera_dm250.c | 380 ++++++++++++++++++++++
+ 6 files changed, 947 insertions(+), 1 deletion(-)
+ create mode 100644 board/kingjim/pomera_dm250/dm250.h
+ create mode 100644 board/kingjim/pomera_dm250/dm250_boot.c
+ create mode 100644 board/kingjim/pomera_dm250/dm250_bt.c
+ create mode 100644 board/kingjim/pomera_dm250/dm250_legacy.c
+
+diff --git a/board/kingjim/pomera_dm250/Makefile b/board/kingjim/pomera_dm250/Makefile
+index 2e84563a46..828cbd756d 100644
+--- a/board/kingjim/pomera_dm250/Makefile
++++ b/board/kingjim/pomera_dm250/Makefile
+@@ -1,3 +1,3 @@
+ # SPDX-License-Identifier: GPL-2.0+
+ 
+-obj-y += pomera_dm250.o
++obj-y += pomera_dm250.o dm250_bt.o dm250_boot.o dm250_legacy.o
+diff --git a/board/kingjim/pomera_dm250/dm250.h b/board/kingjim/pomera_dm250/dm250.h
+new file mode 100644
+index 0000000000..bdad3a53f2
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/dm250.h
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * KING JIM Pomera DM250
++ *
++ * Board code reconstructed from the machine code of the author's U-Boot
++ * (no symbol table). Function names are ours.
++ */
++
++#ifndef __BOARD_KINGJIM_DM250_H
++#define __BOARD_KINGJIM_DM250_H
++
++#include <linux/types.h>
++
++struct blk_desc;
++
++/* Load addresses used by the "sd" and "emmc" commands */
++#define DM250_LEGACY_ADDR	0x60200000	/* legacy U-Boot, same as our TEXT_BASE */
++#define DM250_FDT_ADDR		0x61f00000
++#define DM250_FDT_SIZE		0x100000
++#define DM250_KERNEL_ADDR	0x62000000
++
++/* dm250_bt.c */
++void dm250_fix_bt(void *fdt, ulong bufsize);
++
++/* dm250_boot.c */
++int dm250_boot(struct blk_desc *desc, ulong kernel, ulong fdt);
++
++/* dm250_legacy.c */
++int dm250_patch_legacy(u8 *buf, u32 size, u32 crc);
++
++#endif
+diff --git a/board/kingjim/pomera_dm250/dm250_boot.c b/board/kingjim/pomera_dm250/dm250_boot.c
+new file mode 100644
+index 0000000000..a788e6382f
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/dm250_boot.c
+@@ -0,0 +1,140 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * KING JIM Pomera DM250: bootz with a resume= argument for hibernation
++ *
++ * Reconstructed from the machine code of the author's U-Boot
++ * (0x60202dc8-0x60202ff3 in the author's image). Names are ours.
++ *
++ * When bootargs has root=/dev/mmcblk1p2 and neither resume= nor noresume,
++ * look at the swap signature of partition 3 of the boot device:
++ *   S1SUSPEND  (hibernation image) -> add " resume=/dev/mmcblk1p3 resumewait"
++ *   SWAPSPACE2 (plain swap)        -> add " resume=/dev/mmcblk1p3"
++ * bootargs is put back if bootz returns.
++ */
++
++#include <blk.h>
++#include <command.h>
++#include <env.h>
++#include <errno.h>
++#include <malloc.h>
++#include <memalign.h>
++#include <part.h>
++#include <stdio.h>
++#include <vsprintf.h>
++#include <linux/ctype.h>
++#include <linux/string.h>
++#include "dm250.h"
++
++#define DM250_SWAP_PART		3
++#define DM250_SWAP_NONE		0
++#define DM250_SWAP_PLAIN	1
++#define DM250_SWAP_IMAGE	2
++
++/*
++ * Is there an argument starting with @key? With @val, the last such
++ * argument must be exactly @key@val.
++ */
++static bool dm250_arg_is(const char *s, const char *key, const char *val)
++{
++	size_t klen = strlen(key);
++	size_t vlen = val ? strlen(val) : 0;
++	bool ret = false;
++	const char *t;
++
++	while (*s) {
++		while (isspace(*s))
++			s++;
++		t = s;
++		while (*s && !isspace(*s))
++			s++;
++		if (s - t >= klen && !strncmp(t, key, klen)) {
++			if (!val)
++				return true;
++			ret = s - t == klen + vlen &&
++			      !strncmp(t + klen, val, vlen);
++		}
++	}
++
++	return ret;
++}
++
++/* The signature is in the last 10 bytes of the first 4KiB page */
++static __always_inline int dm250_swap_state(struct blk_desc *desc)
++{
++	ALLOC_CACHE_ALIGN_BUFFER(u8, buf, 512);
++	struct disk_partition info;
++
++	if (!desc || desc->blksz != 512 ||
++	    part_get_info(desc, DM250_SWAP_PART, &info) ||
++	    info.blksz != 512 || info.size < 8 || info.start >= desc->lba ||
++	    info.size > desc->lba - info.start ||
++	    blk_dread(desc, info.start + 7, 1, buf) != 1)
++		return DM250_SWAP_NONE;
++
++	if (!memcmp(buf + 502, "S1SUSPEND", 10))
++		return DM250_SWAP_IMAGE;
++	if (!memcmp(buf + 502, "SWAPSPACE2", 10))
++		return DM250_SWAP_PLAIN;
++
++	return DM250_SWAP_NONE;
++}
++
++static int dm250_bootz(ulong kernel, ulong fdt)
++{
++	char cmd[96];
++
++	snprintf(cmd, sizeof(cmd), "bootz %lx - %lx", kernel, fdt);
++
++	return run_command(cmd, 0);
++}
++
++int dm250_boot(struct blk_desc *desc, ulong kernel, ulong fdt)
++{
++	const char *args, *extra;
++	char *saved = NULL, *buf;
++	size_t len;
++	int state, ret;
++
++	args = env_get("bootargs");
++	if (args && dm250_arg_is(args, "root=", "/dev/mmcblk1p2") &&
++	    !dm250_arg_is(args, "resume=", NULL) &&
++	    !dm250_arg_is(args, "noresume", NULL)) {
++		state = dm250_swap_state(desc);
++		if (state != DM250_SWAP_NONE) {
++			extra = state == DM250_SWAP_IMAGE ?
++				" resume=/dev/mmcblk1p3 resumewait" :
++				" resume=/dev/mmcblk1p3";
++			saved = strdup(args);
++			if (!saved)
++				return -ENOMEM;
++			len = strlen(saved) + strlen(extra) + 1;
++			buf = malloc(len);
++			if (!buf) {
++				free(saved);
++				return -ENOMEM;
++			}
++			snprintf(buf, len, "%s%s", saved, extra);
++			ret = env_set("bootargs", buf);
++			free(buf);
++			if (ret) {
++				free(saved);
++				return ret;
++			}
++			puts(state == DM250_SWAP_IMAGE ?
++			     "Pomera: hibernation image found on /dev/mmcblk1p3\n" :
++			     "Pomera: resume target /dev/mmcblk1p3\n");
++		}
++	}
++
++	ret = dm250_bootz(kernel, fdt);
++
++	if (saved) {
++		if (env_set("bootargs", saved)) {
++			puts("Pomera: failed to restore bootargs after bootz\n");
++			ret = -EIO;
++		}
++		free(saved);
++	}
++
++	return ret;
++}
+diff --git a/board/kingjim/pomera_dm250/dm250_bt.c b/board/kingjim/pomera_dm250/dm250_bt.c
+new file mode 100644
+index 0000000000..5b611bd347
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/dm250_bt.c
+@@ -0,0 +1,328 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * KING JIM Pomera DM250: factory Bluetooth address
++ *
++ * Reconstructed from the machine code of the author's U-Boot
++ * (0x60202864-0x60202dc7 in the author's image). Names are ours.
++ *
++ * If the kernel DT has no usable local-bd-address, read it from the eMMC:
++ * the PARM block gives "mtdparts=rk29xxnand:", that gives the sys_info
++ * partition, and its ext4 has /bt_mac.dat ("xx:xx:xx:xx:xx:xx").
++ * Any failure is reported and the boot goes on.
++ */
++
++#include <blk.h>
++#include <dm.h>
++#include <errno.h>
++#include <ext4fs.h>
++#include <malloc.h>
++#include <memalign.h>
++#include <mmc.h>
++#include <part.h>
++#include <stdio.h>
++#include <linux/ctype.h>
++#include <linux/libfdt.h>
++#include <linux/sizes.h>
++#include <linux/string.h>
++#include <asm/unaligned.h>
++#include "dm250.h"
++
++#define DM250_BT_PATH		"/serial@20060000/bluetooth"
++#define DM250_BT_PROP		"local-bd-address"
++#define DM250_MTDPARTS		"mtdparts=rk29xxnand:"
++
++/* PARM is looked for at 0x2000, 0x2400, ... 0x3c00 */
++#define DM250_PARM_LBA		0x2000
++#define DM250_PARM_END		0x4000
++#define DM250_PARM_STEP		0x400
++
++/* Addresses that are not a real factory address (stored reversed) */
++static const u8 dm250_bad_bdaddr[6][6] = {
++	{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
++	{ 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa },
++	{ 0x55, 0x44, 0x33, 0x22, 0x11, 0x00 },
++	{ 0x00, 0xa0, 0x02, 0x70, 0x20, 0x00 },
++	{ 0x00, 0x00, 0xa0, 0x02, 0x70, 0x20 },
++	{ 0xac, 0x1f, 0x12, 0xa0, 0x43, 0x43 },
++};
++
++static inline int dm250_hexval(char c)
++{
++	if (c >= '0' && c <= '9')
++		return c - '0';
++	c = tolower(c);
++	if (c >= 'a' && c <= 'f')
++		return c - 'a' + 10;
++
++	return -1;
++}
++
++/* "0x" and 1 to 8 hex digits */
++static int dm250_parse_hex(const char **pp, u32 *val)
++{
++	const char *p = *pp;
++	u32 v = 0;
++	int n = 0, d;
++
++	if (p[0] != '0' || (p[1] & 0xdf) != 'X')
++		return -EINVAL;
++
++	for (p += 2; (d = dm250_hexval(*p)) >= 0; p++) {
++		if (++n > 8)
++			return -ERANGE;
++		v = v << 4 | d;
++	}
++	if (!n)
++		return -EINVAL;
++
++	*pp = p;
++	*val = v;
++
++	return 0;
++}
++
++static bool dm250_bdaddr_valid(const u8 *addr)
++{
++	int i;
++
++	if (addr[5] & 1)
++		return false;
++	for (i = 0; i < ARRAY_SIZE(dm250_bad_bdaddr); i++)
++		if (!memcmp(addr, dm250_bad_bdaddr[i], 6))
++			return false;
++
++	return true;
++}
++
++/* Same CRC-32 as in pomera_dm250.c, over [buf, end) */
++static u32 dm250_crc32(const u8 *buf, const u8 *end)
++{
++	u32 crc = 0;
++	int i;
++
++	while (buf != end) {
++		crc ^= (u32)*buf++ << 24;
++		for (i = 0; i < 8; i++)
++			crc = (crc << 1) ^ ((s32)crc < 0 ? 0x04c10db7 : 0);
++	}
++
++	return crc;
++}
++
++/*
++ * PARM data: "CMDLINE:" line with mtdparts=rk29xxnand:size@offset(name),...
++ * Sizes and offsets are "0x" hex in blocks, relative to 0x2000.
++ */
++static int dm250_parse_parm(const char *data, lbaint_t lba,
++			    struct disk_partition *part)
++{
++	const char *p, *eol, *name;
++	bool found = false;
++	u32 size, off;
++
++	p = strstr(data, "CMDLINE:");
++	if (!p || (p != data && p[-1] != '\n'))
++		return -EINVAL;
++	eol = strchr(p, '\n');
++	p = strstr(p, DM250_MTDPARTS);
++	if (!p || (eol && p >= eol))
++		return -EINVAL;
++	p += strlen(DM250_MTDPARTS);
++
++	for (;;) {
++		char first = *p;
++
++		size = 0;
++		if (first == '-')
++			p++;
++		else if (dm250_parse_hex(&p, &size) || !size)
++			return -EINVAL;
++		if (*p++ != '@' || dm250_parse_hex(&p, &off) || *p++ != '(')
++			return -EINVAL;
++
++		for (name = p; ; p++) {
++			if (!*p)
++				return -EINVAL;
++			if (*p == ')')
++				break;
++			if (isspace(*p))
++				return -EINVAL;
++		}
++
++		if (p - name == 8 && !memcmp(name, "sys_info", 8)) {
++			u64 start = (u64)off + DM250_PARM_LBA;
++
++			if (first == '-' || found || start < DM250_PARM_END ||
++			    start >= lba || lba - start < size)
++				return -EINVAL;
++			part->start = start;
++			part->size = size;
++			part->blksz = 512;
++			found = true;
++		}
++
++		p++;
++		if (!*p || isspace(*p))
++			break;
++		if (*p++ != ',' || !*p || isspace(*p))
++			return -EINVAL;
++	}
++
++	return found ? 0 : -ENOENT;
++}
++
++static int dm250_find_sysinfo(struct blk_desc *desc,
++			      struct disk_partition *part)
++{
++	lbaint_t lba;
++	u32 len, blocks;
++	u8 *buf;
++	int ret = -EINVAL;
++
++	memset(part, 0, sizeof(*part));
++	buf = memalign(ARCH_DMA_MINALIGN, SZ_64K);
++	if (!buf)
++		return -ENOMEM;
++
++	for (lba = DM250_PARM_LBA; lba != DM250_PARM_END;
++	     lba += DM250_PARM_STEP) {
++		if (lba >= desc->lba || blk_dread(desc, lba, 1, buf) != 1)
++			continue;
++		if (memcmp(buf, "PARM", 4))
++			continue;
++
++		/* "PARM", length, data, CRC-32 of the data */
++		len = get_unaligned_le32(buf + 4);
++		if (!len || len > SZ_64K - 12)
++			continue;
++		blocks = DIV_ROUND_UP(len + 12, 512);
++		if (desc->lba - lba < blocks ||
++		    blk_dread(desc, lba, blocks, buf) != blocks)
++			continue;
++		if (dm250_crc32(buf + 8, buf + 8 + len) !=
++		    get_unaligned_le32(buf + 8 + len))
++			continue;
++		if (memchr(buf + 8, 0, len - 1))
++			continue;
++		buf[8 + len] = 0;
++
++		ret = dm250_parse_parm((char *)buf + 8, desc->lba, part);
++		break;
++	}
++
++	free(buf);
++
++	return ret;
++}
++
++/* /bt_mac.dat: "xx:xx:xx:xx:xx:xx", optionally followed by CR/LF */
++static int dm250_read_bdaddr(u8 *addr)
++{
++	char line[20];
++	loff_t len, actread;
++	int i, n, hi, lo, ret;
++
++	ret = ext4fs_open("/bt_mac.dat", &len);
++	if (ret)
++		goto out;
++	if (len < 17 || len > 19) {
++		ret = -EINVAL;
++		goto out;
++	}
++	ret = ext4fs_read(line, 0, len, &actread);
++	if (ret)
++		goto out;
++	if (actread != len) {
++		ret = -EIO;
++		goto out;
++	}
++
++	ret = -EINVAL;
++	n = len;
++	if (n && line[n - 1] == '\n')
++		n--;
++	if (n && line[n - 1] == '\r')
++		n--;
++	if (n != 17)
++		goto out;
++
++	for (i = 0; i < 6; i++) {
++		const char *s = line + 3 * i;
++
++		if (i != 5 && s[2] != ':')
++			goto out;
++		hi = dm250_hexval(s[0]);
++		lo = dm250_hexval(s[1]);
++		if (hi < 0 || lo < 0)
++			goto out;
++		addr[5 - i] = hi << 4 | lo;
++	}
++	if (dm250_bdaddr_valid(addr))
++		ret = 0;
++out:
++	ext4fs_close();
++
++	return ret;
++}
++
++void dm250_fix_bt(void *fdt, ulong bufsize)
++{
++	struct disk_partition part;
++	struct udevice *dev;
++	struct blk_desc *desc;
++	struct mmc *mmc;
++	const void *prop;
++	u8 addr[6];
++	u32 total;
++	int node, len, ret;
++
++	node = fdt_path_offset(fdt, DM250_BT_PATH);
++	if (node < 0)
++		return;
++	prop = fdt_getprop(fdt, node, DM250_BT_PROP, &len);
++	if (prop && len == 6 && dm250_bdaddr_valid(prop))
++		return;
++
++	ret = uclass_get_device_by_seq(UCLASS_MMC, 0, &dev);
++	if (ret)
++		goto fail;
++	mmc = mmc_get_mmc_dev(dev);
++	ret = mmc_init(mmc);
++	if (ret)
++		goto fail;
++	desc = mmc_get_blk_desc(mmc);
++	if (IS_SD(mmc) || !desc || desc->hwpart || desc->blksz != 512) {
++		ret = -ENODEV;
++		goto fail;
++	}
++
++	ret = dm250_find_sysinfo(desc, &part);
++	if (ret)
++		goto fail;
++	ret = ext4fs_probe(desc, &part);
++	if (ret)
++		goto fail;
++	ret = dm250_read_bdaddr(addr);
++	if (ret)
++		goto fail;
++
++	total = fdt_totalsize(fdt);
++	if (bufsize < total || bufsize - total < 128) {
++		ret = -ENOSPC;
++		goto fail;
++	}
++	ret = fdt_open_into(fdt, fdt, total + 128);
++	if (ret)
++		goto fail;
++	node = fdt_path_offset(fdt, DM250_BT_PATH);
++	ret = fdt_setprop(fdt, node, DM250_BT_PROP, addr, 6);
++	if (ret)
++		goto fail;
++	puts("Pomera: Bluetooth address loaded from eMMC sys_info\n");
++
++	return;
++
++fail:
++	printf("Pomera: factory Bluetooth address unavailable (%d), continuing boot\n",
++	       ret);
++}
+diff --git a/board/kingjim/pomera_dm250/dm250_legacy.c b/board/kingjim/pomera_dm250/dm250_legacy.c
+new file mode 100644
+index 0000000000..ba0fd81e3d
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/dm250_legacy.c
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * KING JIM Pomera DM250: check and patch the legacy eMMC U-Boot
++ *
++ * Reconstructed from the machine code of the author's U-Boot
++ * (0x60202ff4-0x602031cf in the author's image). Names are ours.
++ *
++ * The legacy U-Boot runs at 0x60200000, so the words below are addresses
++ * in its own image. Two known builds are accepted:
++ *   size 0x50368, CRC 0x67cca333: used as it is
++ *   size 0x51df8, CRC 0xb72955b3 or 0x1983b8e4: the first two words of the
++ *     table at +0x3fe04 are swapped, so that the eMMC is looked at before
++ *     the SD card. The table and what it points to are checked first.
++ * Any other build is refused.
++ */
++
++#include <errno.h>
++#include <stdio.h>
++#include <asm/unaligned.h>
++#include "dm250.h"
++
++#define DM250_OLD_SIZE		0x50368
++#define DM250_OLD_CRC		0x67cca333
++#define DM250_NEW_SIZE		0x51df8
++#define DM250_NEW_CRC_A		0xb72955b3
++#define DM250_NEW_CRC_B		0x1983b8e4
++
++/* Offsets in the 0x51df8 build */
++#define DM250_ORDER_TABLE	0x3fe04	/* three pointers */
++#define DM250_ORDER_0		0x602476e8
++#define DM250_ORDER_1		0x6024772c
++#define DM250_ORDER_2		0x602477b4
++#define DM250_ORDER_REF		0x50904	/* {table, 23, table + 4, 23} */
++
++#define DM250_OFF(a)		((a) - DM250_LEGACY_ADDR)
++
++int dm250_patch_legacy(u8 *buf, u32 size, u32 crc)
++{
++	u8 *tbl = buf + DM250_ORDER_TABLE;
++	u8 *ref = buf + DM250_ORDER_REF;
++
++	if (size == DM250_OLD_SIZE && crc == DM250_OLD_CRC)
++		return 0;
++	if (size != DM250_NEW_SIZE ||
++	    (crc != DM250_NEW_CRC_A && crc != DM250_NEW_CRC_B)) {
++		printf("Pomera: unsupported legacy U-Boot (size=%u, CRC=%08x)\n",
++		       size, crc);
++		return -EOPNOTSUPP;
++	}
++
++	if (get_unaligned_le32(tbl) != DM250_ORDER_0 ||
++	    get_unaligned_le32(tbl + 4) != DM250_ORDER_1 ||
++	    get_unaligned_le32(tbl + 8) != DM250_ORDER_2 ||
++	    get_unaligned_le32(buf + DM250_OFF(DM250_ORDER_0)) != 0x40000 ||
++	    get_unaligned_le32(buf + DM250_OFF(DM250_ORDER_1)) != 0x20002 ||
++	    get_unaligned_le32(ref) != DM250_LEGACY_ADDR + DM250_ORDER_TABLE ||
++	    get_unaligned_le32(ref + 4) != 23 ||
++	    get_unaligned_le32(ref + 8) != DM250_LEGACY_ADDR + DM250_ORDER_TABLE + 4 ||
++	    get_unaligned_le32(ref + 12) != 23)
++		return -EBADMSG;
++
++	put_unaligned_le32(DM250_ORDER_1, tbl);
++	put_unaligned_le32(DM250_ORDER_0, tbl + 4);
++	puts("Pomera: legacy storage order: eMMC before SD\n");
++
++	return 0;
++}
+diff --git a/board/kingjim/pomera_dm250/pomera_dm250.c b/board/kingjim/pomera_dm250/pomera_dm250.c
+index 35b825c7b7..c9c2f45c2e 100644
+--- a/board/kingjim/pomera_dm250/pomera_dm250.c
++++ b/board/kingjim/pomera_dm250/pomera_dm250.c
+@@ -1,9 +1,389 @@
+ // SPDX-License-Identifier: GPL-2.0+
+ /*
+  * KING JIM Pomera DM250
++ *
++ * Reconstructed from the machine code of the author's U-Boot
++ * (0x6020232c-0x6020285f in the author's image). Names are ours.
++ *
++ * "sd"   reads KRNL and the resource image (rk-kernel.dtb) from the
++ *        SD card and boots it with bootz.
++ * "emmc" loads the legacy U-Boot from the eMMC (LOADER at sector 0x4000),
++ *        turns the display off and jumps to it.
+  */
+ 
++#include <blk.h>
++#include <command.h>
++#include <cpu_func.h>
++#include <bootm.h>
++#include <backlight.h>
++#include <dm.h>
++#include <errno.h>
++#include <generic-phy.h>
++#include <hang.h>
++#include <memalign.h>
++#include <mmc.h>
++#include <stdio.h>
++#include <dm/root.h>
++#include <linux/delay.h>
++#include <linux/libfdt.h>
++#include <linux/sizes.h>
++#include <linux/string.h>
++#include <asm/io.h>
++#include <asm/unaligned.h>
++#include <power/pmic.h>
++#include "dm250.h"
++
++/* Rockchip "second loader" header (LOADER at sector 0x4000 of the eMMC) */
++struct dm250_loader_hdr {
++	char magic[8];			/* "LOADER  " */
++	u32 version;
++	u32 reserved;
++	u32 load_addr;
++	u32 load_size;
++	u32 crc32;
++};
++
++/* Rockchip resource image (RSCE) */
++struct dm250_rsce_hdr {
++	char magic[4];			/* "RSCE" */
++	u16 ptn_version;
++	u16 tbl_version;
++	u8 hdr_blocks;
++	u8 tbl_offset;			/* blocks */
++	u8 entry_blocks;
++	u32 entry_num;
++};
++
++struct dm250_rsce_entry {
++	char tag[4];			/* "ENTR" */
++	char name[256];
++	u32 offset;			/* blocks from the start of the image */
++	u32 size;			/* bytes */
++};
++
++#define DM250_LEGACY_LBA	0x4000
++#define DM250_LEGACY_MAX	(SZ_1M - SZ_2K)
++#define DM250_KRNL_LBA		0x6000
++#define DM250_KRNL_BLOCKS	0x6000
++#define DM250_RSCE_LBA		0xc000
++#define DM250_RSCE_BLOCKS	0x3000
++
++#define DM250_VOP_BASE		0x1010e000
++#define DM250_VOP_SYS_CTRL	0x00
++#define DM250_VOP_AXI_BUS_CTRL	0x2c
++#define DM250_VOP_CFG_DONE	0x90
++#define DM250_GRF_BASE		0x20008000
++
+ int rk_board_late_init(void)
+ {
++	struct udevice *pmic;
++	int ret;
++
++	ret = uclass_get_device_by_name(UCLASS_PMIC, "pmic@1c", &pmic);
++	if (ret) {
++		printf("DM250: RK818 unavailable (%d)\n", ret);
++		return 0;
++	}
++
++	ret = pmic_clrsetbits(pmic, 0xa1, 0, 0x70);
++	if (!ret)
++		ret = pmic_clrsetbits(pmic, 0x52, 0, 0x02);
++	if (!ret)
++		ret = pmic_clrsetbits(pmic, 0x23, 0, 0x60);
++	if (!ret)
++		ret = pmic_reg_write(pmic, 0x20, 1);
++	if (ret)
++		printf("DM250: RK818 setup failed (%d)\n", ret);
++
++	return 0;
++}
++
++/* CRC-32 as Rockchip uses it: poly 0x04c10db7, MSB first, init 0, no xor */
++static u32 dm250_crc32(const u8 *buf, size_t len)
++{
++	const u8 *end = buf + len;
++	u32 crc = 0;
++	int i;
++
++	while (buf != end) {
++		crc ^= (u32)*buf++ << 24;
++		for (i = 0; i < 8; i++)
++			crc = (crc << 1) ^ ((s32)crc < 0 ? 0x04c10db7 : 0);
++	}
++
++	return crc;
++}
++
++static int dm250_read(struct blk_desc *desc, lbaint_t start, lbaint_t count,
++		      void *buf)
++{
++	if (start >= desc->lba || desc->lba - start < count)
++		return -EINVAL;
++
++	return blk_dread(desc, start, count, buf) == count ? 0 : -EIO;
++}
++
++static int dm250_load_legacy(struct blk_desc *desc)
++{
++	ALLOC_CACHE_ALIGN_BUFFER(u8, buf, 2048);
++	struct dm250_loader_hdr *hdr = (void *)buf;
++	u32 addr, size, crc, len;
++	int ret;
++
++	ret = dm250_read(desc, DM250_LEGACY_LBA, 4, buf);
++	if (ret)
++		return ret;
++	if (memcmp(hdr->magic, "LOADER  ", 8))
++		return -EINVAL;
++
++	addr = hdr->load_addr;
++	size = hdr->load_size;
++	crc = hdr->crc32;
++	if (addr != DM250_LEGACY_ADDR || !size || size > DM250_LEGACY_MAX)
++		return -EINVAL;
++
++	len = size + 511;
++	ret = dm250_read(desc, DM250_LEGACY_LBA + 4, len / 512, (void *)addr);
++	if (ret)
++		return ret;
++
++	if (dm250_crc32((u8 *)addr, size) != crc)
++		return -EBADMSG;
++
++	ret = dm250_patch_legacy((u8 *)addr, size, crc);
++	if (ret)
++		return ret;
++
++	flush_cache(addr, len & ~511);
++	invalidate_icache_all();
++	printf("DM250: legacy eMMC U-Boot loaded at 0x%08x (%u bytes)\n",
++	       addr, size);
++
++	return 0;
++}
++
++static int dm250_load_dtb(struct blk_desc *desc)
++{
++	ALLOC_CACHE_ALIGN_BUFFER(u8, hbuf, 512);
++	ALLOC_CACHE_ALIGN_BUFFER(u8, ebuf, 512);
++	struct dm250_rsce_hdr *hdr = (void *)hbuf;
++	struct dm250_rsce_entry *ent = (void *)ebuf;
++	u32 i, end, off, size;
++	int n, blocks, ret;
++
++	ret = dm250_read(desc, DM250_RSCE_LBA, 1, hbuf);
++	if (ret)
++		return ret;
++	if (memcmp(hdr->magic, "RSCE", 4))
++		return -EINVAL;
++	if (hdr->ptn_version)
++		return -EINVAL;
++	if (hdr->tbl_version)
++		return -EINVAL;
++	if (hdr->hdr_blocks != 1)
++		return -EINVAL;
++	if (hdr->entry_blocks != 1)
++		return -EINVAL;
++	i = hdr->tbl_offset;
++	n = hdr->entry_num;
++	if (!i || n > DM250_RSCE_BLOCKS - i)
++		return -EINVAL;
++
++	end = i + n;
++	do {
++		if (i == end)
++			return -ENOENT;
++		ret = dm250_read(desc, DM250_RSCE_LBA + i, 1, ebuf);
++		if (ret)
++			return ret;
++		if (memcmp(ent->tag, "ENTR", 4))
++			return -EINVAL;
++		i++;
++	} while (strncmp(ent->name, "rk-kernel.dtb", sizeof(ent->name)));
++
++	off = ent->offset;
++	size = ent->size;
++	if (size < 40 || size > DM250_FDT_SIZE)
++		return -EFBIG;
++	blocks = DIV_ROUND_UP(size, 512);
++	if (off < end || off >= DM250_RSCE_BLOCKS ||
++	    blocks > DM250_RSCE_BLOCKS - off)
++		return -EINVAL;
++
++	ret = dm250_read(desc, DM250_RSCE_LBA + off, blocks,
++			 (void *)DM250_FDT_ADDR);
++	if (ret)
++		return ret;
++
++	return fdt_check_full((void *)DM250_FDT_ADDR, size);
++}
++
++static int dm250_load_kernel(struct blk_desc *desc, u32 *sizep)
++{
++	ALLOC_CACHE_ALIGN_BUFFER(u32, hdr, 128);
++	u8 *k = (u8 *)DM250_KERNEL_ADDR;
++	u32 size;
++	int blocks;
++	int ret;
++
++	ret = dm250_read(desc, DM250_KRNL_LBA, 1, hdr);
++	if (ret)
++		return ret;
++	if (memcmp(hdr, "KRNL", 4))
++		return -EINVAL;
++
++	/* "KRNL", size, image, CRC-32 of the image */
++	size = hdr[1];
++	if (!size || size > SZ_32M - 12)
++		return -EFBIG;
++	blocks = DIV_ROUND_UP(size + 12, 512);
++	if (blocks > DM250_KRNL_BLOCKS)
++		return -EFBIG;
++
++	ret = dm250_read(desc, DM250_KRNL_LBA, blocks, k);
++	if (ret)
++		return ret;
++	if (dm250_crc32(k + 8, size) != get_unaligned_le32(k + 8 + size))
++		return -EBADMSG;
++
++	memmove(k, k + 8, size);
++	*sizep = size;
++
+ 	return 0;
+ }
++
++static int do_dm250_boot(struct cmd_tbl *cmdtp, int flag, int argc,
++			 char *const argv[])
++{
++	const char *name = cmdtp->name;
++	struct udevice *dev;
++	struct blk_desc *desc;
++	struct mmc *mmc;
++	bool legacy;
++	int devnum, ret;
++
++	if (argc != 1)
++		return CMD_RET_USAGE;
++
++	legacy = false;
++	devnum = 1;
++	if (!strcmp(name, "emmc")) {
++		legacy = true;
++		devnum = 0;
++	} else if (strcmp(name, "sd")) {
++		return CMD_RET_USAGE;
++	}
++	if (legacy)
++		printf("DM250: boot from %s (mmc %d), legacy U-Boot\n",
++		       name, devnum);
++	else
++		printf("DM250: boot from %s (mmc %d), direct rootfs\n",
++		       name, devnum);
++
++	ret = uclass_get_device_by_seq(UCLASS_MMC, devnum, &dev);
++	if (ret)
++		goto fail;
++	mmc = mmc_get_mmc_dev(dev);
++	ret = mmc_init(mmc);
++	if (ret)
++		goto fail;
++	desc = mmc_get_blk_desc(mmc);
++	if (!desc || desc->blksz != 512) {
++		ret = -EINVAL;
++		goto fail;
++	}
++
++	if (legacy) {
++		struct udevice *bl, *lvds;
++		struct phy phy;
++		bool phy_ok = true;
++		u32 val;
++
++		puts("DM250: loading legacy eMMC U-Boot\n");
++		ret = dm250_load_legacy(desc);
++		if (ret)
++			goto fail;
++		puts("DM250: starting legacy eMMC U-Boot\n");
++
++		ret = uclass_get_device(UCLASS_PANEL_BACKLIGHT, 0, &bl);
++		if (!ret) {
++			ret = backlight_set_brightness(bl, BACKLIGHT_OFF);
++			if (ret)
++				printf("DM250: failed to turn off backlight (%d)\n",
++				       ret);
++		} else {
++			printf("DM250: backlight unavailable during shutdown (%d)\n",
++			       ret);
++		}
++
++		/* VOP: WIN0 off and standby, then the dclk outputs off */
++		val = readl(DM250_VOP_BASE + DM250_VOP_SYS_CTRL);
++		val &= ~BIT(0);
++		val |= BIT(30);
++		writel(val, DM250_VOP_BASE + DM250_VOP_SYS_CTRL);
++		writel(1, DM250_VOP_BASE + DM250_VOP_CFG_DONE);
++		udelay(20000);
++		val = readl(DM250_VOP_BASE + DM250_VOP_AXI_BUS_CTRL);
++		val &= ~(BIT(26) | BIT(24) | BIT(22));
++		writel(val, DM250_VOP_BASE + DM250_VOP_AXI_BUS_CTRL);
++
++		ret = uclass_get_device_by_driver(UCLASS_DISPLAY,
++						  DM_DRIVER_GET(rk3126_lvds),
++						  &lvds);
++		if (!ret) {
++			ret = generic_phy_get_by_name(lvds, "dphy", &phy);
++			if (ret) {
++				printf("DM250: LVDS PHY unavailable during shutdown (%d)\n",
++				       ret);
++				phy_ok = false;
++			}
++		} else {
++			printf("DM250: LVDS display unavailable during shutdown (%d)\n",
++			       ret);
++			phy_ok = false;
++		}
++
++		/* GRF_LVDS_CON0: clear the LVDS bits (write mask in the upper half) */
++		writel(0x03cf0000, DM250_GRF_BASE + 0x150);
++
++		if (phy_ok) {
++			ret = generic_phy_power_off(&phy);
++			if (ret)
++				printf("DM250: failed to power off LVDS PHY (%d)\n",
++				       ret);
++		}
++		puts("DM250: display disabled before legacy U-Boot\n");
++
++		board_quiesce_devices();
++		dm_remove_devices_active();
++		cleanup_before_linux();
++		((void (*)(int, int))DM250_LEGACY_ADDR)(0, 0);
++		hang();
++	} else {
++		u32 size;
++
++		ret = dm250_load_kernel(desc, &size);
++		if (ret)
++			goto fail;
++		ret = dm250_load_dtb(desc);
++		if (ret)
++			goto fail;
++		printf("DM250: kernel %u bytes, separate resource DTB, no initramfs\n",
++		       size);
++
++		dm250_fix_bt((void *)DM250_FDT_ADDR, DM250_FDT_SIZE);
++
++		return dm250_boot(desc, DM250_KERNEL_ADDR, DM250_FDT_ADDR) ?
++			CMD_RET_FAILURE : CMD_RET_SUCCESS;
++	}
++
++fail:
++	printf("DM250: image load failed (%d)\n", ret);
++	return CMD_RET_FAILURE;
++}
++
++U_BOOT_CMD(emmc, 1, 0, do_dm250_boot,
++	   "chainload the legacy DM250 eMMC U-Boot", "");
++
++U_BOOT_CMD(sd, 1, 0, do_dm250_boot,
++	   "boot DM250 directly from SD", "");
+-- 
+2.47.3
+

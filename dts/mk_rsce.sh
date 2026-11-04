@@ -1,12 +1,13 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 yasoteien
-# 作者の DTS から、今使っている DTB と RSCE を組む。
+# DM250 用 Debian 13 イメージ（https://www.ekesete.net/log/?p=9565）の DTB を DTS に戻した物から、
+# 今使っている DTB と RSCE を組む。
 #
 #   bash mk_rsce.sh [出力先]	（既定はこの台本のある所）
 #
 # 作る物:
-#   rk3128-pomera-dm250-author.dtb  作者の DTB と同じ物
+#   rk3128-pomera-dm250-image.dtb   イメージの DTB と同じ物
 #   rk3128-pomera-dm250.dtb         それに mk_leds.sh・mk_panel.sh を当てた物
 #   rsce.bin                        1MiB の RSCE（項目 rk-kernel.dtb 1 つ）。SD カードの
 #                                   24MiB の位置（RSCE 領域）に書く物
@@ -21,10 +22,10 @@ check() {	# check ファイル sha256
 	echo "$1: $2"
 }
 
-dtc -q -b 0 -I dts -O dtb -o rk3128-pomera-dm250-author.dtb "$HERE/rk3128-pomera-dm250-author.dts"
-check rk3128-pomera-dm250-author.dtb bd97037c2e7eddb99a9a4042e1ffc716402c5199450aafbe3a5bacf6ef8b4c48
+dtc -q -b 0 -I dts -O dtb -o rk3128-pomera-dm250-image.dtb "$HERE/rk3128-pomera-dm250-image.dts"
+check rk3128-pomera-dm250-image.dtb bd97037c2e7eddb99a9a4042e1ffc716402c5199450aafbe3a5bacf6ef8b4c48
 
-bash "$HERE/mk_leds.sh" rk3128-pomera-dm250-author.dtb leds.dtb.tmp
+bash "$HERE/mk_leds.sh" rk3128-pomera-dm250-image.dtb leds.dtb.tmp
 bash "$HERE/mk_panel.sh" leds.dtb.tmp rk3128-pomera-dm250.dtb
 rm leds.dtb.tmp
 check rk3128-pomera-dm250.dtb e39acaed18786ffa5a0eb546667c026e3f52ef6c0b9cc5aec40cae0aade18a9f

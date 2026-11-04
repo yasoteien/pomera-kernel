@@ -1,0 +1,36 @@
+From 9b3f94c665fd46f9a9d754b21271706defaa7a0b Mon Sep 17 00:00:00 2001
+From: Alex Bee <knaerzche@gmail.com>
+Date: Mon, 10 Feb 2025 14:21:55 +0100
+Subject: [PATCH 07/46] rockchip: rk3128: Add UART's clock frequency
+
+RK3128's uart clocks are not supported by u-boot's clock driver, so add
+clock-frequency property to SoC's u-boot.dtsi
+
+Signed-off-by: Alex Bee <knaerzche@gmail.com>
+---
+ arch/arm/dts/rk3128-u-boot.dtsi | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/arch/arm/dts/rk3128-u-boot.dtsi b/arch/arm/dts/rk3128-u-boot.dtsi
+index 371440005f..4d8efa179d 100644
+--- a/arch/arm/dts/rk3128-u-boot.dtsi
++++ b/arch/arm/dts/rk3128-u-boot.dtsi
+@@ -25,3 +25,15 @@
+ &sdmmc {
+ 	fifo-mode;
+ };
++
++&uart0 {
++	clock-frequency = <24000000>;
++};
++
++&uart1 {
++	clock-frequency = <24000000>;
++};
++
++&uart2 {
++	clock-frequency = <24000000>;
++};
+-- 
+2.47.3
+

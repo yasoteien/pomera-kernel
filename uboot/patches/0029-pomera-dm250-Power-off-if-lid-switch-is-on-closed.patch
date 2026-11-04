@@ -1,0 +1,43 @@
+From aa4e6c5540988ab1c837787c7431d0831170b6b8 Mon Sep 17 00:00:00 2001
+From: joshua stein <jcs@jcs.org>
+Date: Wed, 25 Mar 2026 15:12:33 -0500
+Subject: [PATCH 29/46] pomera-dm250: Power off if lid switch is on (closed)
+
+Do this as PREBOOT rather than BOOTCOMMAND so it can be overridden.
+---
+ configs/pomera-dm250_defconfig | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/configs/pomera-dm250_defconfig b/configs/pomera-dm250_defconfig
+index 517e6e7f0f..b9f0956921 100644
+--- a/configs/pomera-dm250_defconfig
++++ b/configs/pomera-dm250_defconfig
+@@ -14,7 +14,7 @@ CONFIG_DEBUG_UART=y
+ CONFIG_BOOTDELAY=1
+ CONFIG_OF_BOARD_SETUP=y
+ CONFIG_FDT_SIMPLEFB=y
+-CONFIG_BOOTCOMMAND="setenv stdout serial,vidconsole; setenv stderr serial,vidconsole; cls; bootefi bootmgr"
++CONFIG_BOOTCOMMAND="if button 'Lid Switch'; then poweroff; fi; setenv silent; cls; bootefi bootmgr"
+ CONFIG_USE_PREBOOT=y
+ CONFIG_PREBOOT="setenv silent 1; setenv stdin serial,tc3589x-keyb; setenv stdout serial,vidconsole; setenv stderr serial,vidconsole; fdt addr ${fdtcontroladdr}; fdt set /chosen stdout-path /framebuffer; fatload mmc 0 ${loadaddr} logo.bmp; bmp d ${loadaddr} m m"
+ CONFIG_DEFAULT_FDT_FILE="rockchip/pomera-dm250.dtb"
+@@ -27,6 +27,7 @@ CONFIG_DISPLAY_BOARDINFO_LATE=y
+ CONFIG_CMD_GPT=y
+ CONFIG_CMD_I2C=y
+ CONFIG_CMD_MMC=y
++CONFIG_CMD_POWEROFF=y
+ CONFIG_CMD_USB=y
+ CONFIG_CMD_ROCKUSB=y
+ CONFIG_CMD_USB_MASS_STORAGE=y
+@@ -35,6 +36,8 @@ CONFIG_CMD_BMP=y
+ CONFIG_CMD_TIME=y
+ CONFIG_OF_EMBED=y
+ CONFIG_ENV_IS_IN_MMC=y
++CONFIG_BUTTON=y
++CONFIG_BUTTON_GPIO=y
+ CONFIG_FASTBOOT_BUF_ADDR=0x60800800
+ CONFIG_FASTBOOT_BUF_SIZE=0x04000000
+ CONFIG_FASTBOOT_CMD_OEM_FORMAT=y
+-- 
+2.47.3
+

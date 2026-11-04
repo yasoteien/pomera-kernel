@@ -1,0 +1,25 @@
+From a44af90be2b1f4365141a7a79aaa8789e83a0e6d Mon Sep 17 00:00:00 2001
+From: joshua stein <jcs@jcs.org>
+Date: Wed, 16 Sep 2026 22:15:49 -0500
+Subject: [PATCH 32/46] rockchip: ROCKCHIP_RK3128 enables
+ ARMV7_SET_CORTEX_SMPEN
+
+---
+ arch/arm/mach-rockchip/Kconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm/mach-rockchip/Kconfig b/arch/arm/mach-rockchip/Kconfig
+index 5b9266ca7d..5dfe9417dd 100644
+--- a/arch/arm/mach-rockchip/Kconfig
++++ b/arch/arm/mach-rockchip/Kconfig
+@@ -65,6 +65,7 @@ config ROCKCHIP_RK3066
+ config ROCKCHIP_RK3128
+ 	bool "Support Rockchip RK3128"
+ 	select CPU_V7A
++	select ARMV7_SET_CORTEX_SMPEN
+ 	select BOARD_LATE_INIT
+ 	select CLK
+ 	select DM_REGULATOR_FIXED
+-- 
+2.47.3
+

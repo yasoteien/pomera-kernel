@@ -1,0 +1,29 @@
+pomera-kernel: U-Boot を書き換えた後にポメラが起きなくなった時
+
+1. SD カードを抜いて電源を入れると、本体（eMMC）の純正のポメラが起きます。
+
+2. SD を直すには、PC（Linux か Mac）で、DM250 用イメージの U-Boot を書き戻します。
+   U-Boot を戻すと、SD の 12MiB・24MiB のカーネル（イメージの物か、新しい U-Boot に移る前に
+   入れた物。移った後は書き換えていません）で起きます。
+   U-Boot の写しは、SD の最初の区画（FAT、PC から見える所）の pomera-kernel/uboot-image.img です。
+   書き戻す先は区画ではなく SD カード全体です。名前を間違えると PC のディスクを壊すので、
+   SD を挿す前と後で一覧を見比べて、SD カードの名前を確かめてください。
+
+   Linux（例 /dev/sdX。lsblk で確かめる）:
+     sudo dd if=uboot-image.img of=/dev/sdX bs=1M seek=8 conv=fsync,notrunc
+
+   Mac（例 /dev/diskN。diskutil list で確かめる）:
+     diskutil unmountDisk /dev/diskN
+     sudo dd if=uboot-image.img of=/dev/rdiskN bs=1m seek=8 conv=notrunc
+
+3. SD をポメラに戻して起動します。起きたら、pomera-kernel status で今の組を見られます。
+
+Linux が起きている時は、sudo pomera-kernel rollback で 1 つ前の組に戻せます。
+
+---
+If the Pomera no longer starts after the U-Boot was replaced: remove the SD
+card and the built-in (eMMC) Pomera firmware starts. To repair the card, write
+pomera-kernel/uboot-image.img (on the first, FAT partition of the card) back to
+the whole card at 8 MiB with dd (bs=1M seek=8 conv=notrunc), as shown above.
+The card then starts with the kernel at 12 MiB and 24 MiB (the image's, or the
+one installed before the move to the new U-Boot; it is not changed after that).

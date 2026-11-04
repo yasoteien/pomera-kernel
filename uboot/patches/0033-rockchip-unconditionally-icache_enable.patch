@@ -1,0 +1,26 @@
+From c38286d203596880aeb543bccea8e04b243bf0f0 Mon Sep 17 00:00:00 2001
+From: joshua stein <jcs@jcs.org>
+Date: Wed, 16 Sep 2026 22:16:31 -0500
+Subject: [PATCH 33/46] rockchip: unconditionally icache_enable
+
+start.S may not have done it and it won't hurt to do it again.
+---
+ arch/arm/mach-rockchip/board.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm/mach-rockchip/board.c b/arch/arm/mach-rockchip/board.c
+index 2e6bb38b92..329f3e624e 100644
+--- a/arch/arm/mach-rockchip/board.c
++++ b/arch/arm/mach-rockchip/board.c
+@@ -208,7 +208,7 @@ int board_init(void)
+ #if !defined(CONFIG_SYS_DCACHE_OFF) && !defined(CONFIG_ARM64)
+ void enable_caches(void)
+ {
+-	/* Enable D-cache. I-cache is already enabled in start.S */
++	icache_enable();
+ 	dcache_enable();
+ }
+ #endif
+-- 
+2.47.3
+

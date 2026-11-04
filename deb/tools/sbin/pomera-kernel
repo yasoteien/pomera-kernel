@@ -1,26 +1,38 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 yasoteien
-# 自前カーネル（KRNL と RSCE の組）を「次の起動で 1 回だけ試し、正常なら確定、だめなら元の組で起き直す」形で入れ替える。
-# pomera-kernel-tools の一部。apt（postinst）は stage するだけで、SD の 12MiB・24MiB には書かない。書くのは confirm だけ。
+# 自前カーネルの組（U-Boot・KRNL・RSCE）を「次の起動で 1 回だけ試し、正常なら確定、だめなら元の組で起き直す」形で入れ替える。
+# pomera-kernel-tools の一部。apt（postinst）は stage するだけで、SD には書かない。書くのは confirm と rollback だけ。
 #
-#   pomera-kernel status              12MiB・24MiB に入っている組、待っている版、前回の結果
+#   pomera-kernel status              U-Boot・表・組 0/A/B・次の起動の組・待っている版・前回の結果・戻せる組
 #   pomera-kernel list                入っている版（/usr/lib/pomera-kernel/<版>/）
 #   pomera-kernel stage <版>          次の起動で試す版にする（postinst が呼ぶ）
 #   pomera-kernel unstage             試す予定を取り消す
 #   pomera-kernel boot-trial          （pomera-kernel-trial.service）待っている版があれば watchdog を動かして kexec する
-#   pomera-kernel confirm             （pomera-kernel-confirm.service）試しの起動が正常なら組を 12MiB・24MiB に書いて確定する
+#   pomera-kernel confirm             （pomera-kernel-confirm.service）試しの起動が正常なら組を SD に書いて確定する
 #   pomera-kernel rollback            退避した組（prev）と今の組を入れ替える（次の起動から前の組。もう一度流せば戻る）
 #   pomera-kernel keep                apt の autoremove が消さない版（今の組・1 つ前の組・動いている版・待っている版）を
 #                                     /etc/apt/apt.conf.d/01pomera-kernel-autoremove に書き直す（stage・confirm・rollback の後にも流れる）
+#
+# 置き方（docs/KERNEL_AB_LAYOUT.md）: U-Boot 8〜12MiB（1MiB の写し 4 つ）、組 0 = 12/24MiB（DM250 用イメージの組。
+# 表を読む U-Boot では書き換えない）、表 26MiB・27MiB（512 バイト）、組 A = 32/44MiB、組 B = 48/60MiB。
+# 版に uboot.img が無く、今の U-Boot も表を読まない時だけ、今までどおり組 0（12/24MiB）に直接書く（「直接」の書き方）。
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 LIB=/usr/lib/pomera-kernel
 VAR=/var/lib/pomera-kernel
 DEV=/dev/mmcblk1
-KRNL_OFF=12   # MiB
-RSCE_OFF=24   # MiB
+# 試験だけ: 偽の SD（ファイル）と置き場に替える。台本を source して関数を呼ぶ（POMERA_KERNEL_SOURCE=1）
+if [ "${POMERA_KERNEL_TEST:-}" = 1 ]; then
+	DEV=${POMERA_KERNEL_DEV:?}; LIB=${POMERA_KERNEL_LIB:?}; VAR=${POMERA_KERNEL_VAR:?}
+fi
+UB_OFF=8          # MiB。U-Boot の写しは 8・9・10・11MiB
+SLOT_K=(12 32 48) # 組 0・A・B の KRNL（MiB、12MiB の大きさ）
+SLOT_R=(24 44 60) # 組 0・A・B の RSCE（MiB、1MiB の大きさ）
+SLOT_N=(0 A B)
+TBL=(26 27)       # 表の 2 か所（MiB）
+P1_MIN=64         # MiB。表を使う書き方では、p1 がここより後で始まる事
 OPEN_TIMEOUT=240
 HEALTH_WAIT=90
 
@@ -46,18 +58,26 @@ machine_ok() {
 	return 1
 }
 
+root_dev() { findmnt -n -o SOURCE /; }
+p1_start() { cat "/sys/class/block/$(basename "$DEV")p1/start" 2>/dev/null || echo 0; }   # 512 バイトの区画の数
+if [ -b "$DEV" ]; then RDIRECT=iflag=direct; else RDIRECT=iflag=fullblock; fi
+flush() {
+	sync
+	if [ -b "$DEV" ]; then blockdev --flushbufs "$DEV"; echo 3 > /proc/sys/vm/drop_caches; fi
+}
+
 # MiB の位置の先頭 4 バイト（dd | head だと head が先に閉じて dd が Broken pipe を出す）
-magic() { dd if=$DEV bs=4 count=1 iflag=skip_bytes skip=$(( $1 << 20 )) status=none; }
+magic() { dd if="$DEV" bs=4 count=1 iflag=skip_bytes skip=$(( $1 << 20 )) status=none | tr -d '\000'; }
 
 # 書いてよい機械か: 受け入れる機種・SD から起動・12MiB が KRNL・24MiB が RSCE・p1 が 25MiB より後
 check_device() {
 	machine_ok || die "受け入れる機種ではない（model・compatible が DM250 の日本版と一致しない）。何もしない"
-	[ "$(findmnt -n -o SOURCE /)" = "${DEV}p2" ] || die "/ が ${DEV}p2 でない（SD から起動していない）。何もしない"
-	[ "$(magic $KRNL_OFF)" = KRNL ] || die "12MiB が KRNL でない。何もしない"
-	[ "$(magic $RSCE_OFF)" = RSCE ] || die "24MiB が RSCE でない。何もしない"
+	[ "$(root_dev)" = "${DEV}p2" ] || die "/ が ${DEV}p2 でない（SD から起動していない）。何もしない"
+	[ "$(magic "${SLOT_K[0]}")" = KRNL ] || die "12MiB が KRNL でない。何もしない"
+	[ "$(magic "${SLOT_R[0]}")" = RSCE ] || die "24MiB が RSCE でない。何もしない"
 	local p1
-	p1=$(cat /sys/class/block/mmcblk1p1/start 2>/dev/null || echo 0)
-	[ "$p1" -ge $(( (RSCE_OFF + 1) * 2048 )) ] || die "p1 が 24MiB の RSCE と重なる（start=$p1）。何もしない"
+	p1=$(p1_start)
+	[ "$p1" -ge $(( (SLOT_R[0] + 1) * 2048 )) ] || die "p1 が 24MiB の RSCE と重なる（start=$p1）。何もしない"
 }
 
 valid_ver() { [[ "$1" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]] || die "版の名前が違う: $1（6.18.<数>-<印>）"; }
@@ -70,7 +90,7 @@ check_set() {
 	(cd "$d" && sha256sum --quiet -c sha256sums) || die "$1 の組の sha256 が合わない"
 }
 
-region_sha() { dd if=$DEV bs=1M skip="$1" count="$2" iflag=direct status=none | sha256sum | cut -d' ' -f1; }
+region_sha() { dd if="$DEV" bs=1M skip="$1" count="$2" $RDIRECT status=none | sha256sum | cut -d' ' -f1; }
 
 # krnl・rsce の sha256 の組の名前（入っている版の sha256sums と比べる）
 pair_name() {
@@ -85,21 +105,191 @@ pair_name() {
 	echo "不明（作者のカーネルか、入っていない版。krnl ${k:0:12}… rsce ${r:0:12}…）"
 }
 
-# 12MiB・24MiB に入っている物の名前
-which_pair() { pair_name "$(region_sha $KRNL_OFF 12)" "$(region_sha $RSCE_OFF 1)"; }
+# 組 $1（0・1・2）に入っている物の名前
+slot_readable() { [ "$(magic "${SLOT_K[$1]}")" = KRNL ] && [ "$(magic "${SLOT_R[$1]}")" = RSCE ]; }
+slot_pair() {
+	slot_readable "$1" || { echo "空"; return; }
+	pair_name "$(region_sha "${SLOT_K[$1]}" 12)" "$(region_sha "${SLOT_R[$1]}" 1)"
+}
+
+# --- U-Boot（8〜12MiB）---
+ub_sha() { region_sha $UB_OFF 4; }
+
+# 上書きしてよい U-Boot の一覧: tools の物と、入っている版の物（行は「sha256 名前 [table]」。table は表を読む U-Boot）
+ub_known() { cat "$LIB/uboot-known.sha256" "$LIB"/*/uboot-known.sha256 2>/dev/null | awk 'NF >= 2 && $1 !~ /^#/ && !s[$1]++'; }
+ub_name() {
+	local n
+	n=$(ub_known | awk -v h="$1" '$1 == h { print $2; exit }')
+	echo "${n:-不明}"
+}
+# table（表を読む）・image（組 0 だけを読む）・unknown（一覧に無い）
+ub_kind() { ub_known | awk -v h="$1" '$1 == h { print ($3 == "table" ? "table" : "image"); f = 1; exit } END { if (!f) print "unknown" }'; }
+
+# 4MiB の物が U-Boot の形か: 4 つとも LOADER で、4 つが同じ
+check_image() {
+	local f=$1 i
+	[ "$(stat -c %s "$f")" = 4194304 ] || return 1
+	for i in 0 1 2 3; do
+		[ "$(dd if="$f" bs=8 count=1 iflag=skip_bytes skip=$(( i << 20 )) status=none)" = "LOADER  " ] || return 1
+	done
+	[ "$(for i in 0 1 2 3; do dd if="$f" bs=1M skip=$i count=1 status=none | sha256sum; done | sort -u | wc -l)" = 1 ]
+}
+
+# 4MiB の物を 8〜12MiB に書く。2・3・4 番目を先に、1 番目を最後に（途中で落ちても、1 番目は最後まで前の物）
+put_uboot() {
+	local f=$1 h i
+	for i in 1 2 3 0; do
+		h=$(dd if="$f" bs=1M skip=$i count=1 status=none | sha256sum | cut -d' ' -f1)
+		if crash_at "ub$(( i + 1 )).half"; then
+			dd if="$f" of="$DEV" bs=512K skip=$(( i * 2 )) seek=$(( (UB_OFF + i) * 2 )) count=1 conv=fsync,notrunc status=none
+			boom "ub$(( i + 1 )).half"
+		fi
+		dd if="$f" of="$DEV" bs=1M skip=$i seek=$(( UB_OFF + i )) count=1 conv=fsync,notrunc status=none
+		flush
+		[ "$(region_sha $(( UB_OFF + i )) 1)" = "$h" ] ||
+			die "U-Boot の $(( i + 1 )) 番目の写しの読み戻しが違う。止める（status で見て、rollback で戻す）"
+		crash_point "ub$(( i + 1 ))"
+	done
+	[ "$(ub_sha)" = "$(sha256sum "$f" | cut -d' ' -f1)" ] || die "書いた後の 8〜12MiB が違う。rollback で戻す"
+}
+
+# p1（vfat）の置き場。マウントされていなければ /run/pomera-kernel-p1 に付ける。vfat でなければ空
+P1MNT=/run/pomera-kernel-p1
+p1_dir() {
+	local m
+	[ "$(blkid -o value -s TYPE "${DEV}p1" 2>/dev/null)" = vfat ] || return 0
+	m=$(findmnt -n -o TARGET "${DEV}p1" 2>/dev/null | head -1 || true)
+	if [ -z "$m" ]; then
+		mkdir -p $P1MNT && mount -t vfat "${DEV}p1" $P1MNT 2>/dev/null && m=$P1MNT
+	fi
+	echo "$m"
+}
+p1_done() { if findmnt -n $P1MNT >/dev/null 2>&1; then umount $P1MNT || true; fi; }
+
+# --- 表（26MiB・27MiB、512 バイト、little endian。docs/KERNEL_AB_LAYOUT.md §3）---
+#   tbl read <dev> <MiB>                         → 「番号 組 KRNL RSCE 名前」か、壊れていれば「-」
+#   tbl make <番号> <組> <名前> <出す所>           → 512 バイトの表
+tbl() {
+	python3 - "$@" <<'PY'
+import struct, sys, zlib
+SLOTS = {0: (12, 24), 1: (32, 44), 2: (48, 60)}
+def parse(b):
+    if len(b) != 512 or b[:4] != b"PKTB":
+        return None
+    if struct.unpack_from("<I", b, 508)[0] != zlib.crc32(b[:508]):
+        return None
+    ver, seq, slot, k, r = struct.unpack_from("<5I", b, 4)
+    # 知らない版の表と、位置が組の番号と合わない表は壊れた物とみなす（⑥ と同じ）
+    if ver != 1 or SLOTS.get(slot) != (k, r):
+        return None
+    name = b[24:56].split(b"\0")[0].decode("ascii", "replace") or "-"
+    return seq, slot, k, r, name
+a = sys.argv[1:]
+if a[0] == "read":
+    with open(a[1], "rb") as f:
+        f.seek(int(a[2]) << 20)
+        t = parse(f.read(512))
+    print("-" if t is None else "%d %d %d %d %s" % t)
+elif a[0] == "make":
+    seq, slot, name = int(a[1]), int(a[2]), a[3].encode("ascii")[:31]
+    b = bytearray(512)
+    b[:4] = b"PKTB"
+    struct.pack_into("<5I", b, 4, 1, seq, slot, *SLOTS[slot])
+    b[24:24 + len(name)] = name
+    struct.pack_into("<I", b, 508, zlib.crc32(bytes(b[:508])))
+    with open(a[4], "wb") as f:
+        f.write(b)
+else:
+    sys.exit(2)
+PY
+}
+
+# 2 つの表を読む: T_OK・T_SEQ・T_SLOT・T_NAME（添字 0 = 26MiB、1 = 27MiB）
+read_tables() {
+	local i l
+	T_OK=(0 0); T_SEQ=(0 0); T_SLOT=("" ""); T_NAME=("" "")
+	for i in 0 1; do
+		l=$(tbl read "$DEV" "${TBL[$i]}")
+		[ "$l" != - ] || continue
+		# shellcheck disable=SC2086
+		set -- $l
+		T_OK[$i]=1; T_SEQ[$i]=$1; T_SLOT[$i]=$2; T_NAME[$i]=$5
+	done
+}
+# 合う表の添字を、番号の大きい順に
+tables_by_seq() {
+	if [ "${T_OK[0]}" = 1 ] && [ "${T_OK[1]}" = 1 ]; then
+		if [ "${T_SEQ[1]}" -gt "${T_SEQ[0]}" ]; then echo 1 0; else echo 0 1; fi
+	elif [ "${T_OK[0]}" = 1 ]; then echo 0
+	elif [ "${T_OK[1]}" = 1 ]; then echo 1
+	fi
+}
+# 表を読む U-Boot（⑥）が選ぶ組（§4）: 番号の大きい合う表 → 読めなければもう 1 つ → どちらも駄目なら組 0
+slot_by_tables() {
+	local i
+	read_tables
+	for i in $(tables_by_seq); do
+		slot_readable "${T_SLOT[$i]}" && { echo "${T_SLOT[$i]}"; return; }
+	done
+	echo 0
+}
+# 次の起動で読まれる組。表を読まない U-Boot なら組 0
+next_slot() {
+	if [ "$(ub_kind "$(ub_sha)")" = table ]; then slot_by_tables; else echo 0; fi
+}
+boot_pair() { slot_pair "$(next_slot)"; }
+
+# 表を 1 か所だけに書く（§5 の 3）: 古い方（壊れていればその方）に、番号を「大きい方 ＋1」にして。もう 1 つは前の組を指したまま
+write_table() {
+	local s=$1 nm=$2 i seq f
+	read_tables
+	if [ "${T_OK[0]}" != 1 ]; then i=0
+	elif [ "${T_OK[1]}" != 1 ]; then i=1
+	elif [ "${T_SEQ[0]}" -le "${T_SEQ[1]}" ]; then i=0
+	else i=1; fi
+	seq=$(( (T_SEQ[0] > T_SEQ[1] ? T_SEQ[0] : T_SEQ[1]) + 1 ))
+	f=$VAR/table.new
+	tbl make "$seq" "$s" "$nm" "$f"
+	if crash_at table.half; then
+		dd if="$f" of="$DEV" bs=256 seek=$(( TBL[i] * 4096 )) count=1 conv=fsync,notrunc status=none
+		boom table.half
+	fi
+	dd if="$f" of="$DEV" bs=512 seek=$(( TBL[i] * 2048 )) count=1 conv=fsync,notrunc status=none
+	flush
+	dd if="$DEV" bs=512 skip=$(( TBL[i] * 2048 )) count=1 $RDIRECT status=none | cmp -s - "$f" ||
+		die "${TBL[$i]}MiB の表の読み戻しが違う。止める"
+	rm -f "$f"
+	log "表を書いた: ${TBL[$i]}MiB に 番号 $seq・組 ${SLOT_N[$s]}（$nm）"
+	crash_point table
+}
+
+# --- 電源断の試験の口（試験 SD の門だけが使う）---
+# $VAR/crash-at に段の名前を書いておくと、その段で echo b > /proc/sysrq-trigger で落とす（1 回で消す）。
+# 段: krnl.half krnl rsce.half rsce table.half table ub2.half ub2 ub3.half ub3 ub4.half ub4 ub1.half ub1
+CRASH=$VAR/crash-at
+crash_at() { [ -f "$CRASH" ] && [ "$(head -n1 "$CRASH")" = "$1" ]; }
+boom() {
+	rm -f "$CRASH"; sync
+	log "試験の口: $1 で落とす"
+	[ "${POMERA_KERNEL_TEST:-}" = 1 ] && exit 99
+	echo b > /proc/sysrq-trigger
+	sleep 30; exit 99
+}
+crash_point() { if crash_at "$1"; then boom "$1"; fi; }
 
 KEEP_CONF=/etc/apt/apt.conf.d/01pomera-kernel-autoremove
 
 # apt の autoremove が消さない版を書く（2026-11-04 のユーザーの決定: 古い版は autoremove、今の版と 1 つ前は残す）。
-# 今の組（12MiB・24MiB）・1 つ前の組（prev）・動いている版・待っている版のうち、入っているパッケージの物だけ。
+# 今の組（次の起動の組）・1 つ前の組（prev）・動いている版・待っている版のうち、入っているパッケージの物だけ。
 # Debian の linux-image の 01autoremove-kernels と同じ APT::NeverAutoRemove の形。
 write_keep() {
 	local v vs=() t
-	for v in "$(which_pair 2>/dev/null || true)" "$( [ -f "$VAR/prev/sha256sums" ] && prev_name 2>/dev/null || true)" \
+	for v in "$(boot_pair 2>/dev/null || true)" "$(prev_name 2>/dev/null || true)" \
 		"$(uname -r)" "$(cat "$VAR/pending" 2>/dev/null || true)"; do
 		[[ "$v" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]] && [ -d "$LIB/$v" ] || continue
 		[[ " ${vs[*]} " == *" $v "* ]] || vs+=("$v")
 	done
+	[ "${POMERA_KERNEL_TEST:-}" = 1 ] && return 0
 	t=$(mktemp "$KEEP_CONF.XXXXXX")
 	{
 		echo "// pomera-kernel keep が書く（手で変えない）。今の組・1 つ前の組・動いている版・待っている版"
@@ -110,10 +300,37 @@ write_keep() {
 	chmod 0644 "$t"; mv "$t" "$KEEP_CONF"
 }
 
-# 退避した組（$VAR/prev）の名前
+# 退避した組（$VAR/prev）の名前。表の形（uboot.img と slot）なら、その組の今の中身。直接の形なら退避した KRNL・RSCE
 prev_name() {
-	pair_name "$(awk '$2 == "krnl-12M.bin" {print $1}' "$VAR/prev/sha256sums")" \
-		"$(awk '$2 == "rsce.bin" {print $1}' "$VAR/prev/sha256sums")"
+	if [ -f "$VAR/prev/uboot.img" ]; then
+		slot_pair "$(cat "$VAR/prev/slot")"
+	elif [ -f "$VAR/prev/sha256sums" ]; then
+		pair_name "$(awk '$2 == "krnl-12M.bin" {print $1}' "$VAR/prev/sha256sums")" \
+			"$(awk '$2 == "rsce.bin" {print $1}' "$VAR/prev/sha256sums")"
+	else
+		return 1
+	fi
+}
+
+# systemd（PID 1）が RuntimeWatchdogSec で /dev/watchdog を持っていると（FDTP の安定化の 90-pomera-watchdog.conf など）、
+# 自分では開けない（EBUSY、2026-11-04 に普段の SD で起きた）。試しの間だけ systemd に手放させる。/etc に置くので、
+# 試しの起動（kexec の先）でも systemd は watchdog を持たず、dw_wdt が open_timeout まで ping して戻りの道が今までどおり働く。
+# 確定した後（confirm）か、確定しないまま戻った後（次の boot-trial）に消して、systemd に返す。
+TRIAL_CONF=/etc/systemd/system.conf.d/99-pomera-kernel-trial.conf
+watchdog_release() {
+	mkdir -p "$(dirname "$TRIAL_CONF")"
+	printf '# pomera-kernel: 試し起動の間だけ systemd に watchdog を手放させる（確定・戻りの後に消す）\n[Manager]\nRuntimeWatchdogSec=0\n' > "$TRIAL_CONF"
+	systemctl daemon-reexec
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		[ "$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null)" = 0 ] && return 0
+		sleep 1
+	done
+	return 1
+}
+watchdog_restore() {
+	[ -f "$TRIAL_CONF" ] || return 0
+	rm -f "$TRIAL_CONF"
+	systemctl daemon-reexec || true
 }
 
 arm_watchdog() {
@@ -128,32 +345,235 @@ os.close(fd)
 PY
 }
 
-write_region() {  # $1 = ファイル, $2 = MiB の位置
-	local f=$1 off=$2 n h
+write_region() {  # $1 = ファイル, $2 = MiB の位置, $3 = 試験の口の段の名前（krnl・rsce）
+	local f=$1 off=$2 st=${3:-} n h
 	n=$(( ($(stat -c %s "$f") + 1048575) / 1048576 ))
 	h=$(sha256sum "$f" | cut -d' ' -f1)
-	dd if="$f" of=$DEV bs=1M seek="$off" conv=fsync,notrunc status=none
-	sync; blockdev --flushbufs $DEV; echo 3 > /proc/sys/vm/drop_caches
+	if [ -n "$st" ] && crash_at "$st.half"; then
+		dd if="$f" of="$DEV" bs=1M seek="$off" count=$(( (n + 1) / 2 )) conv=fsync,notrunc status=none
+		boom "$st.half"
+	fi
+	dd if="$f" of="$DEV" bs=1M seek="$off" conv=fsync,notrunc status=none
+	flush
 	[ "$(region_sha "$off" "$n")" = "$h" ] || die "書いた $f が読み戻しで合わない（$off MiB）"
+	[ -z "$st" ] || crash_point "$st"
 }
 
-save_pair() {  # 今の 12MiB・24MiB を $1（既定 $VAR/prev）に退避
+save_pair() {  # 直接の書き方: 今の 12MiB・24MiB を $1（既定 $VAR/prev）に退避
 	local d=${1:-$VAR/prev}
 	mkdir -p "$d"
-	dd if=$DEV of="$d/krnl-12M.bin" bs=1M skip=$KRNL_OFF count=12 iflag=direct status=none
-	dd if=$DEV of="$d/rsce.bin" bs=1M skip=$RSCE_OFF count=1 iflag=direct status=none
+	dd if="$DEV" of="$d/krnl-12M.bin" bs=1M skip="${SLOT_K[0]}" count=12 $RDIRECT status=none
+	dd if="$DEV" of="$d/rsce.bin" bs=1M skip="${SLOT_R[0]}" count=1 $RDIRECT status=none
 	(cd "$d" && sha256sum krnl-12M.bin rsce.bin > sha256sums)
-	[ "$(sha256sum < "$d/krnl-12M.bin" | cut -d' ' -f1)" = "$(region_sha $KRNL_OFF 12)" ] || die "退避が合わない"
+	[ "$(sha256sum < "$d/krnl-12M.bin" | cut -d' ' -f1)" = "$(region_sha "${SLOT_K[0]}" 12)" ] || die "退避が合わない"
 }
+
+# 表の形の退避: 今の U-Boot（4MiB）と次の起動の組を $1 に（KRNL・RSCE は SD の組に残っているので写さない）
+save_boot() {
+	local d=$1 cur=$2
+	rm -rf "$d"; mkdir -p "$d"
+	dd if="$DEV" of="$d/uboot.img" bs=1M skip=$UB_OFF count=4 $RDIRECT status=none
+	[ "$(sha256sum "$d/uboot.img" | cut -d' ' -f1)" = "$cur" ] || die "退避した U-Boot の sha256 が違う。書かない"
+	next_slot > "$d/slot"
+	sync
+}
+
+# p1 に、イメージの U-Boot の写しと戻し方を置く（PC から 8MiB に書けば、イメージの組で起きる。§9.5）
+save_image_uboot_p1() {
+	local f=$1 h m
+	h=$(sha256sum "$f" | cut -d' ' -f1)
+	m=$(p1_dir)
+	if [ -n "$m" ]; then
+		mkdir -p "$m/pomera-kernel"
+		if [ "$(sha256sum "$m/pomera-kernel/uboot-image.img" 2>/dev/null | cut -d' ' -f1)" != "$h" ]; then
+			cp "$f" "$m/pomera-kernel/uboot-image.img"
+			cp "$LIB/RESTORE.txt" "$m/pomera-kernel/RESTORE.txt" 2>/dev/null || true
+			sync
+			[ "$(sha256sum "$m/pomera-kernel/uboot-image.img" | cut -d' ' -f1)" = "$h" ] ||
+				log "p1 へのイメージの U-Boot の写しが合わない（$VAR/prev/uboot.img はある）"
+		fi
+	fi
+	p1_done
+}
+
+# 書き方を決めて門を見る（boot-trial と confirm が使う）。決めた物: MODE（table・direct）、CUR_UB、NEW_UB（書く uboot.img か空）。
+# 通らなければ GATE に理由を入れて 1
+plan() {
+	local V=$1 k nh m
+	GATE=; NEW_UB=; CUR_UB=$(ub_sha); k=$(ub_kind "$CUR_UB")
+	if [ -f "$LIB/$V/uboot.img" ]; then
+		check_image "$LIB/$V/uboot.img" || { GATE="$V の uboot.img が U-Boot の形でない（4MiB・LOADER の写し 4 つ）"; return 1; }
+		nh=$(sha256sum "$LIB/$V/uboot.img" | cut -d' ' -f1)
+		[ "$(ub_kind "$nh")" = table ] || { GATE="$V の uboot.img が、表を読む U-Boot として一覧（uboot-known.sha256）に無い"; return 1; }
+		[ "$nh" = "$CUR_UB" ] || NEW_UB=$LIB/$V/uboot.img
+		MODE=table
+	elif [ "$k" = table ]; then
+		MODE=table
+	else
+		MODE=direct; return 0
+	fi
+	# 知らない U-Boot は表を読まないので、確定しても新しい組で起きない。上書きもしない
+	[ "$k" != unknown ] || { GATE="今の 8〜12MiB が知らない U-Boot（${CUR_UB:0:12}…）"; return 1; }
+	[ "$(p1_start)" -ge $(( P1_MIN * 2048 )) ] || { GATE="p1 が ${P1_MIN}MiB より前で始まる（組 A・B の所と重なる）"; return 1; }
+	if [ -n "$NEW_UB" ]; then
+		# ⑥ は p1 の uboot.env を読み、既定の環境を丸ごと置き換える。誰の物か分からないので書かない
+		m=$(p1_dir)
+		if [ -n "$m" ] && [ -e "$m/uboot.env" ]; then
+			p1_done; GATE="p1 に uboot.env がある（新しい U-Boot はこれを既定の環境の代わりに使う）。中身を確かめて消してから"; return 1
+		fi
+		p1_done
+	fi
+	return 0
+}
+
+# 表の形の確定（§5）: 空いた組に KRNL・RSCE → 退避 → 表を 1 か所 → U-Boot が違えば写し 2・3・4 → 1
+confirm_table() {
+	local V=$1 eff b ws
+	eff=$(next_slot)
+	if [ "$eff" != 0 ]; then ws=$(( 3 - eff ))
+	else
+		read_tables; b=
+		for i in $(tables_by_seq); do b=${T_SLOT[$i]}; break; done
+		if [ "$b" = 1 ]; then ws=2; else ws=1; fi
+	fi
+	log "$V を組 ${SLOT_N[$ws]}（${SLOT_K[$ws]}/${SLOT_R[$ws]}MiB）に書く（次の起動の組は今 ${SLOT_N[$eff]}）"
+	write_region "$LIB/$V/krnl-12M.bin" "${SLOT_K[$ws]}" krnl
+	write_region "$LIB/$V/rsce.bin" "${SLOT_R[$ws]}" rsce
+	save_boot "$VAR/prev.new" "$CUR_UB"
+	rm -rf "$VAR/prev"; mv "$VAR/prev.new" "$VAR/prev"; sync
+	write_table "$ws" "$V"
+	if [ -n "$NEW_UB" ]; then
+		[ "$(ub_kind "$CUR_UB")" = image ] && save_image_uboot_p1 "$VAR/prev/uboot.img"
+		log "U-Boot を書く: $(ub_name "$CUR_UB") → $(ub_name "$(sha256sum "$NEW_UB" | cut -d' ' -f1)")"
+		put_uboot "$NEW_UB"
+	fi
+}
+
+# 表の形の rollback（§6）: 退避した U-Boot と組に戻す（今の物を退避と入れ替える）
+rollback_table() {
+	local d=$VAR/prev tu ts tk cur nm
+	check_image "$d/uboot.img" || die "退避した U-Boot が U-Boot の形でない"
+	tu=$(sha256sum "$d/uboot.img" | cut -d' ' -f1); ts=$(cat "$d/slot")
+	[[ "$ts" =~ ^[012]$ ]] || die "退避した組の番号が違う: $ts"
+	tk=$(ub_kind "$tu")
+	[ "$tk" != unknown ] || die "退避した U-Boot が一覧に無い（$tu）"
+	slot_readable "$ts" || die "戻す先の組 ${SLOT_N[$ts]} が読めない（KRNL・RSCE の頭が無い）"
+	cur=$(ub_sha)
+	[ "$(ub_kind "$cur")" != unknown ] || die "今の 8〜12MiB が知らない U-Boot（${cur:0:12}…）。書かない"
+	[ "$(p1_start)" -ge $(( P1_MIN * 2048 )) ] || die "p1 が ${P1_MIN}MiB より前で始まる。書かない"
+	save_boot "$VAR/prev.new" "$cur"
+	cp "$d/uboot.img" "$VAR/rollback.img"
+	# 表を読む U-Boot に戻すなら、その U-Boot が戻す先の組を選ぶように表を書く（組 0 を指す表もある）
+	if [ "$tk" = table ] && [ "$(slot_by_tables)" != "$ts" ]; then
+		nm=$(slot_pair "$ts"); [[ "$nm" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]] || nm=-
+		write_table "$ts" "$nm"
+	fi
+	if [ "$tu" != "$cur" ]; then
+		log "U-Boot を戻す: $(ub_name "$cur") → $(ub_name "$tu")"
+		put_uboot "$VAR/rollback.img"
+	fi
+	rm -f "$VAR/rollback.img"
+	rm -rf "$d"; mv "$VAR/prev.new" "$d"; sync
+}
+
+# 版 $1 が、もう次の起動の組で、U-Boot も版の物か（uboot.img の無い版は U-Boot を見ない）
+in_place() {
+	[ "$(boot_pair)" = "$1" ] &&
+		{ [ ! -f "$LIB/$1/uboot.img" ] || [ "$(ub_sha)" = "$(sha256sum "$LIB/$1/uboot.img" | cut -d' ' -f1)" ]; }
+}
+
+# 確定の書き込みが途中で止まった（writing が残っている。電源断など）。版が悪いとは限らないので、1 回だけ試し直す
+recover_writing() {
+	local V
+	V=$(cat "$VAR/writing"); rm -f "$VAR/writing" "$VAR/trying"
+	if in_place "$V"; then
+		echo "$V" > "$VAR/current"; rm -f "$VAR/interrupted-$V"
+		echo "$(date -Is) $V の確定の書き込みは最後まで済んでいた（次の起動の組は $V）" > "$VAR/last"
+		log "$V の確定の書き込みは最後まで済んでいた"
+	elif [ -f "$VAR/interrupted-$V" ]; then
+		: > "$VAR/failed-$V"; rm -f "$VAR/interrupted-$V" "$VAR/pending"
+		echo "$(date -Is) $V の確定の書き込みが 2 回途中で止まった。試さない（今の組: $(boot_pair)）" > "$VAR/last"
+		log "$V の確定の書き込みが 2 回途中で止まった。もう試さない（もう一度なら pomera-kernel stage $V）"
+	else
+		: > "$VAR/interrupted-$V"; echo "$V" > "$VAR/pending"
+		echo "$(date -Is) $V の確定の書き込みが途中で止まった（今の組: $(boot_pair)）。もう一度試す" > "$VAR/last"
+		log "$V の確定の書き込みが途中で止まった（電源断か）。もう一度試す"
+	fi
+	write_keep
+}
+
+# 確定の書き込み（confirm の、正常と分かった後）。書き込みの途中の印 writing を置く（電源断で止まったら、次の boot-trial が試し直す）
+confirm_write() {
+	local V=$1
+	plan "$V" || die "$GATE。確定しない（watchdog で今の組に戻る）"
+	echo "$V" > "$VAR/writing"; rm -f "$VAR/trying"; sync
+	if [ "$MODE" = table ]; then
+		confirm_table "$V"
+	else
+		save_pair
+		write_region "$LIB/$V/krnl-12M.bin" "${SLOT_K[0]}" krnl
+		write_region "$LIB/$V/rsce.bin" "${SLOT_R[0]}" rsce
+	fi
+}
+
+rollback_do() {
+	local v
+	[ -d "$VAR/prev" ] || die "戻せる組が無い"
+	check_device
+	if [ -e "$VAR/pending" ] || [ -e "$VAR/trying" ] || [ -e "$VAR/writing" ]; then
+		die "カーネルの入れ替えの途中（$VAR の pending・trying・writing）。それが済むか、unstage してから"
+	fi
+	if [ -f "$VAR/prev/uboot.img" ]; then
+		rollback_table
+	else
+		[ "$(next_slot)" = 0 ] || die "退避した組は 12MiB・24MiB の物だが、今の U-Boot は表で別の組を読んでいる。戻さない"
+		(cd "$VAR/prev" && sha256sum --quiet -c sha256sums) || die "退避した組の sha256 が合わない"
+		# 今の組と退避した組を入れ替える（rollback をもう一度流せば元に戻る）
+		rm -rf "$VAR/prev.new"; save_pair "$VAR/prev.new"
+		write_region "$VAR/prev/krnl-12M.bin" "${SLOT_K[0]}"
+		write_region "$VAR/prev/rsce.bin" "${SLOT_R[0]}"
+		rm -rf "$VAR/prev"; mv "$VAR/prev.new" "$VAR/prev"
+	fi
+	v=$(boot_pair); if [[ "$v" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]]; then echo "$v" > "$VAR/current"; else rm -f "$VAR/current"; fi
+	write_keep
+}
+
+status() {
+	local cur k i s
+	cur=$(ub_sha); k=$(ub_kind "$cur")
+	case $k in
+	table) echo "U-Boot: $(ub_name "$cur")（表を読む。${cur:0:12}…）" ;;
+	image) echo "U-Boot: $(ub_name "$cur")（表を読まない、組 0 だけ。${cur:0:12}…）" ;;
+	*) echo "U-Boot: 知らない物（${cur:0:12}…。表を読まない物として扱う）" ;;
+	esac
+	read_tables
+	for i in 0 1; do
+		if [ "${T_OK[$i]}" = 1 ]; then
+			echo "表 ${TBL[$i]}MiB: 番号 ${T_SEQ[$i]}・組 ${SLOT_N[${T_SLOT[$i]}]}・${T_NAME[$i]}"
+		else
+			echo "表 ${TBL[$i]}MiB: 無いか壊れている"
+		fi
+	done
+	for s in 0 1 2; do echo "組 ${SLOT_N[$s]}（${SLOT_K[$s]}/${SLOT_R[$s]}MiB）: $(slot_pair "$s")"; done
+	s=$(next_slot)
+	echo "次の起動の組: ${SLOT_N[$s]}（$(slot_pair "$s")）"
+}
+
+[ "${POMERA_KERNEL_SOURCE:-}" = 1 ] && return 0
 
 case "${1:-}" in
 status)
-	echo "12MiB・24MiB の組: $(which_pair 2>/dev/null || echo '読めない（root で）')"
+	if [ -r "$DEV" ]; then status; else echo "SD の中身: 読めない（root で）"; fi
 	echo "動いている版: $(uname -r)$(grep -q 'pomera\.trial=' /proc/cmdline && echo '（試しの起動）')"
 	[ -f "$VAR/pending" ] && echo "次の起動で試す版: $(cat "$VAR/pending")"
 	[ -f "$VAR/trying" ] && echo "試している版: $(cat "$VAR/trying")"
+	[ -f "$VAR/writing" ] && echo "確定の書き込みの途中: $(cat "$VAR/writing")"
 	[ -f "$VAR/last" ] && echo "前回の結果: $(cat "$VAR/last")"
-	[ -f "$VAR/prev/sha256sums" ] && echo "戻せる組: $(prev_name 2>/dev/null || echo '読めない')（$VAR/prev。pomera-kernel rollback）"
+	if [ -f "$VAR/prev/uboot.img" ] && [ -r "$DEV" ]; then
+		echo "戻せる組: $(ub_name "$(sha256sum "$VAR/prev/uboot.img" | cut -d' ' -f1)") ＋組 ${SLOT_N[$(cat "$VAR/prev/slot")]}（$(prev_name)。pomera-kernel rollback）"
+	elif [ -f "$VAR/prev/sha256sums" ]; then
+		echo "戻せる組: $(prev_name 2>/dev/null || echo '読めない')（$VAR/prev を 12MiB・24MiB へ。pomera-kernel rollback）"
+	fi
 	exit 0
 	;;
 list) for d in "$LIB"/*/; do [ -d "$d" ] && basename "$d"; done; exit 0 ;;
@@ -164,11 +584,11 @@ mkdir -p "$VAR"
 case "${1:-}" in
 stage)
 	V=${2:?版}; valid_ver "$V"; check_set "$V"
-	# 12MiB・24MiB にもう入っている版は試さない（入れ直しの dpkg -i で同じ版を kexec しない）
-	if [ "$(which_pair)" = "$V" ]; then
-		rm -f "$VAR/pending"; write_keep; log "$V はもう 12MiB・24MiB に入っている。試す予定は作らない"; exit 0
+	# 次の起動の組がもうこの版で、U-Boot も同じなら試さない（入れ直しの dpkg -i で同じ版を kexec しない）
+	if in_place "$V"; then
+		rm -f "$VAR/pending"; write_keep; log "$V はもう次の起動の組に入っている。試す予定は作らない"; exit 0
 	fi
-	echo "$V" > "$VAR/pending"; rm -f "$VAR/failed-$V"; write_keep
+	echo "$V" > "$VAR/pending"; rm -f "$VAR/failed-$V" "$VAR/interrupted-$V"; write_keep
 	log "次の起動で $V を 1 回だけ試す（正常なら確定、だめなら今の組で起き直す）"
 	;;
 unstage) rm -f "$VAR/pending"; write_keep; log "試す予定を取り消した" ;;
@@ -176,19 +596,31 @@ keep) write_keep ;;
 boot-trial)
 	# 試しの起動の中では何もしない（confirm の出番）
 	grep -q 'pomera\.trial=' /proc/cmdline && exit 0
+	# 確定の書き込みが途中で止まった（電源断など）。版が悪いとは限らないので、1 回だけ試し直す
+	if [ -f "$VAR/writing" ]; then watchdog_restore; recover_writing; fi
 	# 前回の試しが確定しないまま戻ってきた＝試しが失敗した。同じ版は二度と自動では試さない
 	if [ -f "$VAR/trying" ]; then
 		V=$(cat "$VAR/trying"); rm -f "$VAR/trying"
 		: > "$VAR/failed-$V"
 		[ "$(cat "$VAR/pending" 2>/dev/null)" = "$V" ] && rm -f "$VAR/pending"
-		echo "$(date -Is) $V の試しは確定しなかった（watchdog で今の組に戻った）" > "$VAR/last"
+		watchdog_restore
+		echo "$(date -Is) $V の試しは確定しなかった（今の組で起き直した）" > "$VAR/last"
 		log "$V の試しは確定しなかった。今の組のまま。もう一度試すなら pomera-kernel stage $V"
 		exit 0
 	fi
+	# 試しの外で残っていたら消す（試しの前に止まった時など）
+	watchdog_restore
 	[ -f "$VAR/pending" ] || exit 0
 	V=$(cat "$VAR/pending"); valid_ver "$V"
 	[ -f "$VAR/failed-$V" ] && { log "$V は前に失敗している。試さない"; rm -f "$VAR/pending"; exit 0; }
 	check_device; check_set "$V"
+	# 書き方の門（U-Boot が一覧にある・p1 の位置・uboot.env・uboot.img の形）。通らなければ試さずに記録する
+	if ! plan "$V"; then
+		rm -f "$VAR/pending"; write_keep
+		echo "$(date -Is) $V を試さなかった: $GATE" > "$VAR/last"
+		log "$V を試さなかった: $GATE"
+		exit 0
+	fi
 	CMD="$(sed -e 's/ *pomera\.trial=[^ ]*//' -e 's/ *watchdog\.open_timeout=[^ ]*//' -e 's/ *resume=[^ ]*//' /proc/cmdline) watchdog.open_timeout=$OPEN_TIMEOUT pomera.trial=$V"
 	# 試験の口: $VAR/extra-cmdline があれば足す（わざと起動しない版の試験用。1 回で消す）
 	if [ -f "$VAR/extra-cmdline" ]; then CMD="$CMD $(head -c 200 "$VAR/extra-cmdline")"; rm -f "$VAR/extra-cmdline"; fi
@@ -196,9 +628,15 @@ boot-trial)
 	LEN=$(od -An -tu4 -j4 -N4 "$LIB/$V/krnl-12M.bin" | tr -d ' ')
 	dd if="$LIB/$V/krnl-12M.bin" of="$Z" bs=1M iflag=skip_bytes,count_bytes skip=8 count="$LEN" status=none
 	kexec -l "$Z" --dtb="$LIB/$V/dtb" --command-line="$CMD"
+	# watchdog を動かせなければ試さない（戻りの道が無いまま kexec しない）。試した印は残さず、予定だけを取り消す
+	if ! { watchdog_release && arm_watchdog; }; then
+		watchdog_restore; kexec -u || true; rm -f "$VAR/pending"; write_keep
+		echo "$(date -Is) watchdog を動かせないので $V を試さなかった（今の組のまま。もう一度なら pomera-kernel stage $V）" > "$VAR/last"
+		log "watchdog を動かせないので $V を試さなかった（今の組のまま）"
+		exit 0   # 失敗にすると普通の起動が degraded に見える。理由は last と journal に残る
+	fi
 	echo "$V" > "$VAR/trying"; rm -f "$VAR/pending"; sync
 	log "$V を試す（kexec）。$OPEN_TIMEOUT 秒の間に確定できなければ watchdog で今の組に戻る"
-	arm_watchdog
 	systemctl --no-block kexec
 	;;
 confirm)
@@ -213,28 +651,24 @@ confirm)
 		sleep 1
 	done
 	[ "$st" = running ] || die "試しの起動が正常でない（systemctl is-system-running = $st）。確定しない（watchdog で今の組に戻る）"
+	# watchdog を誰が持っているかを、書く前に決める（書いてから V で失敗しないように。2026-11-04、試験 SD で起きた）。
+	# 99-pomera-kernel-trial.conf が効いていれば systemd は持たず、自分で V を書く。持っていれば（古い tools の試しの続きなど）、
+	# systemd が ping し続けるので V は書かずに任せる
+	if [ "$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null)" = 0 ]; then wd=own; else wd=systemd; fi
 	check_device; check_set "$V"
-	save_pair
-	write_region "$LIB/$V/krnl-12M.bin" $KRNL_OFF
-	write_region "$LIB/$V/rsce.bin" $RSCE_OFF
+	confirm_write "$V"
 	# kernel の ping に戻す（dw_wdt は止められないので、以後は kernel が ping し続ける）
-	printf V > /dev/watchdog
-	rm -f "$VAR/trying"; echo "$V" > "$VAR/current"; write_keep
+	if [ "$wd" = own ]; then printf V > /dev/watchdog; else log "systemd が watchdog を持っているので、V は書かずに systemd に任せる"; fi
+	rm -f "$VAR/writing" "$VAR/interrupted-$V"; echo "$V" > "$VAR/current"; write_keep
+	# systemd に watchdog を返す（RuntimeWatchdogSec の設定があれば、systemd がまた持つ）
+	watchdog_restore
 	echo "$(date -Is) $V を確定した（前の組は $VAR/prev）" > "$VAR/last"
 	log "$V を確定した。前の組は $VAR/prev（pomera-kernel rollback で戻せる）"
 	;;
 rollback)
-	[ -d "$VAR/prev" ] || die "戻せる組が無い"
-	check_device
-	(cd "$VAR/prev" && sha256sum --quiet -c sha256sums) || die "退避した組の sha256 が合わない"
-	# 今の組と退避した組を入れ替える（rollback をもう一度流せば元に戻る）
-	rm -rf "$VAR/prev.new"; save_pair "$VAR/prev.new"
-	write_region "$VAR/prev/krnl-12M.bin" $KRNL_OFF
-	write_region "$VAR/prev/rsce.bin" $RSCE_OFF
-	rm -rf "$VAR/prev"; mv "$VAR/prev.new" "$VAR/prev"
-	rm -f "$VAR/current"; write_keep
-	echo "$(date -Is) 退避した組に戻した（次の起動から。戻す前の組は $VAR/prev）" > "$VAR/last"
-	log "退避した組に戻した。次の起動から前の組で起きる（戻す前の組は $VAR/prev に入れ替えた）"
+	rollback_do
+	echo "$(date -Is) 退避した組に戻した（次の起動から $(boot_pair)。戻す前の組は $VAR/prev）" > "$VAR/last"
+	log "退避した組に戻した。次の起動から $(boot_pair)（戻す前の組は $VAR/prev に入れ替えた）"
 	;;
-*) sed -n '4,15p' "$0"; exit 2 ;;
+*) sed -n '4,16p' "$0"; exit 2 ;;
 esac

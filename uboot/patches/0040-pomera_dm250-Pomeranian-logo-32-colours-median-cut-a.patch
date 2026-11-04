@@ -1,0 +1,230 @@
+From 5626a68a3383c386d62c67e15e2ca5c122ad8370 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:27:34 +0900
+Subject: [PATCH 40/46] pomera_dm250: Pomeranian logo (32 colours, median cut)
+ and pom.config
+
+mklogo.py png gains N [BLACK]: median cut to N colours without dithering,
+splitting in brightness/chroma so pale pink is kept, and near-black
+pixels snapped to pure black first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ board/kingjim/pomera_dm250/logo-pom.bmp | Bin 0 -> 9612 bytes
+ board/kingjim/pomera_dm250/mklogo.py    |  71 ++++++++++++++++++++++--
+ board/kingjim/pomera_dm250/pom.config   |   3 +
+ 3 files changed, 70 insertions(+), 4 deletions(-)
+ create mode 100644 board/kingjim/pomera_dm250/logo-pom.bmp
+ create mode 100644 board/kingjim/pomera_dm250/pom.config
+
+diff --git a/board/kingjim/pomera_dm250/logo-pom.bmp b/board/kingjim/pomera_dm250/logo-pom.bmp
+new file mode 100644
+index 0000000000000000000000000000000000000000..85e8d22eb7ebf8dac008eb8481ff5f953c5b3a52
+GIT binary patch
+literal 9612
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/board/kingjim/pomera_dm250/mklogo.py b/board/kingjim/pomera_dm250/mklogo.py
+index ff591ed9cd..a993888ef6 100755
+--- a/board/kingjim/pomera_dm250/mklogo.py
++++ b/board/kingjim/pomera_dm250/mklogo.py
+@@ -2,6 +2,12 @@
+ # Make the U-Boot logo for the Pomera DM250 (8-bit RLE8 BMP), without PIL.
+ #
+ #   mklogo.py png IN.png OUT.bmp       PNG (8-bit RGB/RGBA/grey/palette) -> RLE8 BMP
++#   mklogo.py png IN.png OUT.bmp N [BLACK]
++#                                      same, but reduce to N colours picked from the
++#                                      picture (median cut, no dithering). Pixels whose
++#                                      channels are all <= BLACK (default 24) become
++#                                      pure black first, so JPEG noise in a black
++#                                      background does not turn into extra colours
+ #   mklogo.py chart OUT.bmp            the provisional picture: a 1024x600 test chart
+ #   mklogo.py preview IN.bmp OUT.png [X Y]
+ #                                      draw IN.bmp on a 1024x600 RGB565 screen the way
+@@ -107,8 +113,61 @@ def quantize(px):
+     return pal, [[(near(p[0], 6) * 7 + near(p[1], 7)) * 6 + near(p[2], 6) for p in row] for row in px]
+ 
+ 
+-def write_bmp_rle8(path, w, h, px):
+-    pal, rows = quantize(px)
++def median_cut(px, n, black=24):
++    """Return (palette, index rows) with at most n colours, no dithering.
++
++    Boxes are split and colours matched in (brightness, 1.5*(R-G), 1.5*(B-G)),
++    so a small pale tint (pink cheeks on white fur) gets its own colour
++    instead of being eaten by the many grey shades.
++    """
++    px = [[(0, 0, 0) if max(p) <= black else p for p in row] for row in px]
++    cols = {}
++    for row in px:
++        for p in row:
++            cols[p] = cols.get(p, 0) + 1
++
++    def tf(c):
++        r, g, b = c
++        return ((r + g + b) / 3, 1.5 * (r - g), 1.5 * (b - g))
++
++    T = {c: tf(c) for c in cols}
++
++    def rng(bx, k):
++        v = [T[c][k] for c in bx]
++        return max(v) - min(v)
++
++    boxes = [[c for c in cols if c != (0, 0, 0)]]
++    want = n - 1 if (0, 0, 0) in cols else n
++    while len(boxes) < want:
++        bx = max((b for b in boxes if len(b) > 1),
++                 key=lambda b: max(rng(b, k) for k in range(3)), default=None)
++        if bx is None:
++            break
++        k = max(range(3), key=lambda k: rng(bx, k))
++        bx.sort(key=lambda c: T[c][k])
++        tot, half, cut = sum(cols[c] for c in bx), 0, 1
++        for i, c in enumerate(bx):
++            half += cols[c]
++            if half * 2 >= tot:
++                cut = min(max(i, 1), len(bx) - 1)
++                break
++        boxes.remove(bx)
++        boxes += [bx[:cut], bx[cut:]]
++    pal = []
++    for bx in boxes:
++        if bx:
++            t = sum(cols[c] for c in bx)
++            pal.append(tuple(round(sum(c[k] * cols[c] for c in bx) / t) for k in range(3)))
++    if (0, 0, 0) in cols:
++        pal.insert(0, (0, 0, 0))
++    PT = [tf(c) for c in pal]
++    near = {c: min(range(len(pal)), key=lambda i: sum((T[c][k] - PT[i][k]) ** 2 for k in range(3)))
++            for c in cols}
++    return pal, [[near[p] for p in row] for row in px]
++
++
++def write_bmp_rle8(path, w, h, px, ncol=0, black=24):
++    pal, rows = median_cut(px, ncol, black) if ncol else quantize(px)
+     data = bytearray()
+     for y in range(h - 1, -1, -1):          # BMP rows go bottom-up
+         row, x = rows[y], 0
+@@ -248,11 +307,15 @@ def chart(out):
+ 
+ if __name__ == "__main__":
+     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+-    if cmd == "png" and len(sys.argv) == 4:
++    if cmd == "png" and len(sys.argv) in (4, 5, 6):
+         w, h, px = read_png(sys.argv[2])
+         if w > SCREEN_W or h > SCREEN_H:
+             sys.exit(f"{w}x{h} is larger than the {SCREEN_W}x{SCREEN_H} screen")
+-        n, size = write_bmp_rle8(sys.argv[3], w, h, px)
++        ncol = int(sys.argv[4]) if len(sys.argv) > 4 else 0
++        if ncol and not 2 <= ncol <= 256:
++            sys.exit("N must be 2..256")
++        black = int(sys.argv[5]) if len(sys.argv) > 5 else 24
++        n, size = write_bmp_rle8(sys.argv[3], w, h, px, ncol, black)
+         print(f"{w}x{h}, {n} colours, {size} bytes")
+     elif cmd == "chart" and len(sys.argv) == 3:
+         chart(sys.argv[2])
+diff --git a/board/kingjim/pomera_dm250/pom.config b/board/kingjim/pomera_dm250/pom.config
+new file mode 100644
+index 0000000000..5eda63c16a
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/pom.config
+@@ -0,0 +1,3 @@
++CONFIG_VIDEO_LOGO_FILE="board/kingjim/pomera_dm250/logo-pom.bmp"
++CONFIG_VIDEO_LOGO_X=-4
++CONFIG_VIDEO_LOGO_Y=4
+-- 
+2.47.3
+

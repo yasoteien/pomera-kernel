@@ -1,0 +1,30 @@
+From ba7be77986e882160fe22465ae817eb6b17b26d6 Mon Sep 17 00:00:00 2001
+From: Alex Bee <knaerzche@gmail.com>
+Date: Mon, 10 Feb 2025 14:21:55 +0100
+Subject: [PATCH 08/46] rockchip: rk3128: Add fdt_high and initrd_high
+
+Similar to other ARMv7 Rockchip SoCs the linux kernel is unable to access an
+fdt blob or initrd if it is put in DRAM above 512 MB. Add fdt_high and
+initrd_high in order to prevent that.
+
+Signed-off-by: Alex Bee <knaerzche@gmail.com>
+---
+ include/configs/rk3128_common.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/include/configs/rk3128_common.h b/include/configs/rk3128_common.h
+index d8269b0ec9..41db2d3a9c 100644
+--- a/include/configs/rk3128_common.h
++++ b/include/configs/rk3128_common.h
+@@ -25,6 +25,8 @@
+ #define CFG_EXTRA_ENV_SETTINGS \
+ 	ENV_MEM_LAYOUT_SETTINGS \
+ 	"fdt_file=" CONFIG_DEFAULT_FDT_FILE "\0" \
++	"fdt_high=0x7fffffff\0" \
++	"initrd_high=0x7fffffff\0" \
+ 	"partitions=" PARTS_DEFAULT \
+ 	"boot_targets=" BOOT_TARGETS "\0"
+ 
+-- 
+2.47.3
+

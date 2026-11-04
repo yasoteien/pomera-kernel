@@ -1,0 +1,38 @@
+From 4c5d520f5204c3e610895392437ae7359d602e36 Mon Sep 17 00:00:00 2001
+From: Alex Bee <knaerzche@gmail.com>
+Date: Mon, 10 Feb 2025 14:21:55 +0100
+Subject: [PATCH 04/46] arm: rockchip: Fix RK3128 grf register offsets
+
+GRF registers from soc_con0 onwards are currently unusable because of a missing
+offset before these, which is currently compensated by a to big reserved space
+after those registers (to make check_member happy).
+
+Signed-off-by: Alex Bee <knaerzche@gmail.com>
+---
+ arch/arm/include/asm/arch-rockchip/grf_rk3128.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/include/asm/arch-rockchip/grf_rk3128.h b/arch/arm/include/asm/arch-rockchip/grf_rk3128.h
+index fe07d69b42..313052d8a0 100644
+--- a/arch/arm/include/asm/arch-rockchip/grf_rk3128.h
++++ b/arch/arm/include/asm/arch-rockchip/grf_rk3128.h
+@@ -36,6 +36,7 @@ struct rk3128_grf {
+ 	unsigned int gpio3l_pull;
+ 	unsigned int gpio3h_pull;
+ 	unsigned int reserved2;
++	unsigned int acodec_con;
+ 	unsigned int soc_con0;
+ 	unsigned int soc_con1;
+ 	unsigned int soc_con2;
+@@ -43,7 +44,7 @@ struct rk3128_grf {
+ 	unsigned int reserved3[6];
+ 	unsigned int mac_con0;
+ 	unsigned int mac_con1;
+-	unsigned int reserved4[4];
++	unsigned int reserved4[3];
+ 	unsigned int uoc0_con0;
+ 	unsigned int reserved5;
+ 	unsigned int uoc1_con1;
+-- 
+2.47.3
+

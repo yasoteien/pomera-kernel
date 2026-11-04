@@ -1,0 +1,526 @@
+From 5495a5359a5bdf7c8c6d1bbed1295a66715d6fc4 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:27:33 +0900
+Subject: [PATCH 34/46] pomera_dm250: board, config and driver changes matching
+ the author U-Boot
+
+- New board kingjim/pomera_dm250 (TEXT_BASE 0x60200000, bootcmd=sd,
+  env in FAT 1:1, no FIT/USB host/fastboot, ums kept).
+- rk3126_vop: pulse the dclk reset after the window setup.
+- rk3126_lvds: LVDS format from the panel data-mapping; panel and
+  backlight through their drivers instead of raw GPIO/PWM writes.
+- rk8xx: drop the RK818 charger setup (the board sets the RK818).
+- tc3589x: read five GPIO modifier keys as an extra row.
+
+The board C file is still a stub.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ arch/arm/mach-rockchip/Kconfig            |  1 -
+ arch/arm/mach-rockchip/rk3128/Kconfig     |  8 +++
+ board/kingjim/pomera_dm250/Kconfig        | 12 ++++
+ board/kingjim/pomera_dm250/MAINTAINERS    |  5 ++
+ board/kingjim/pomera_dm250/Makefile       |  3 +
+ board/kingjim/pomera_dm250/pomera_dm250.c |  9 +++
+ configs/pomera_dm250_defconfig            | 81 +++++++++++++++++++++++
+ drivers/input/tc3589x_keyb.c              | 40 ++++++++++-
+ drivers/power/pmic/rk8xx.c                | 52 ---------------
+ drivers/video/rockchip/rk3126_lvds.c      | 75 +++++++--------------
+ drivers/video/rockchip/rk3126_vop.c       |  6 ++
+ include/configs/pomera_dm250.h            | 32 +++++++++
+ 12 files changed, 218 insertions(+), 106 deletions(-)
+ create mode 100644 board/kingjim/pomera_dm250/Kconfig
+ create mode 100644 board/kingjim/pomera_dm250/MAINTAINERS
+ create mode 100644 board/kingjim/pomera_dm250/Makefile
+ create mode 100644 board/kingjim/pomera_dm250/pomera_dm250.c
+ create mode 100644 configs/pomera_dm250_defconfig
+ create mode 100644 include/configs/pomera_dm250.h
+
+diff --git a/arch/arm/mach-rockchip/Kconfig b/arch/arm/mach-rockchip/Kconfig
+index 5dfe9417dd..f68c4697b9 100644
+--- a/arch/arm/mach-rockchip/Kconfig
++++ b/arch/arm/mach-rockchip/Kconfig
+@@ -70,7 +70,6 @@ config ROCKCHIP_RK3128
+ 	select CLK
+ 	select DM_REGULATOR_FIXED
+ 	select DM_RESET
+-	select FIT
+ 	select HAS_CUSTOM_SYS_INIT_SP_ADDR
+ 	select PINCTRL
+ 	select RAM
+diff --git a/arch/arm/mach-rockchip/rk3128/Kconfig b/arch/arm/mach-rockchip/rk3128/Kconfig
+index beac91845e..839abddb54 100644
+--- a/arch/arm/mach-rockchip/rk3128/Kconfig
++++ b/arch/arm/mach-rockchip/rk3128/Kconfig
+@@ -11,6 +11,13 @@ config TARGET_EVB_RK3128
+ 	  with full function and phisical connectors support like
+ 	  usb2.0 host ports, LVDS, JTAG, MAC, SDcard, HDMI, USB-2-serial...
+ 
++config TARGET_POMERA_DM250
++	bool "KING JIM Pomera DM250"
++	select BOARD_LATE_INIT
++	help
++	  KING JIM Pomera DM250 (RK3128). Boots the Debian kernel from the
++	  SD card (sd command) or chainloads the legacy eMMC U-Boot (emmc).
++
+ endchoice
+ 
+ config ROCKCHIP_BOOT_MODE_REG
+@@ -29,5 +36,6 @@ config CUSTOM_SYS_INIT_SP_ADDR
+ 	default 0x63f00000
+ 
+ source "board/rockchip/evb_rk3128/Kconfig"
++source "board/kingjim/pomera_dm250/Kconfig"
+ 
+ endif
+diff --git a/board/kingjim/pomera_dm250/Kconfig b/board/kingjim/pomera_dm250/Kconfig
+new file mode 100644
+index 0000000000..5d31dcba6f
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/Kconfig
+@@ -0,0 +1,12 @@
++if TARGET_POMERA_DM250
++
++config SYS_BOARD
++	default "pomera_dm250"
++
++config SYS_VENDOR
++	default "kingjim"
++
++config SYS_CONFIG_NAME
++	default "pomera_dm250"
++
++endif
+diff --git a/board/kingjim/pomera_dm250/MAINTAINERS b/board/kingjim/pomera_dm250/MAINTAINERS
+new file mode 100644
+index 0000000000..aad3208c77
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/MAINTAINERS
+@@ -0,0 +1,5 @@
++POMERA DM250
++S:	Maintained
++F:	board/kingjim/pomera_dm250/
++F:	include/configs/pomera_dm250.h
++F:	configs/pomera_dm250_defconfig
+diff --git a/board/kingjim/pomera_dm250/Makefile b/board/kingjim/pomera_dm250/Makefile
+new file mode 100644
+index 0000000000..2e84563a46
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0+
++
++obj-y += pomera_dm250.o
+diff --git a/board/kingjim/pomera_dm250/pomera_dm250.c b/board/kingjim/pomera_dm250/pomera_dm250.c
+new file mode 100644
+index 0000000000..35b825c7b7
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/pomera_dm250.c
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * KING JIM Pomera DM250
++ */
++
++int rk_board_late_init(void)
++{
++	return 0;
++}
+diff --git a/configs/pomera_dm250_defconfig b/configs/pomera_dm250_defconfig
+new file mode 100644
+index 0000000000..4e60689b67
+--- /dev/null
++++ b/configs/pomera_dm250_defconfig
+@@ -0,0 +1,81 @@
++CONFIG_ARM=y
++CONFIG_ARCH_ROCKCHIP=y
++CONFIG_TEXT_BASE=0x60200000
++CONFIG_NR_DRAM_BANKS=2
++CONFIG_SF_DEFAULT_SPEED=20000000
++CONFIG_ENV_OFFSET=0x0
++CONFIG_DEFAULT_DEVICE_TREE="rockchip/rk3128-pomera-dm250"
++CONFIG_ROCKCHIP_RK3128=y
++CONFIG_TARGET_POMERA_DM250=y
++CONFIG_SYS_BOOTM_LEN=0x4000000
++CONFIG_SYS_LOAD_ADDR=0x60800800
++CONFIG_DEBUG_UART_BASE=0x20064000
++CONFIG_DEBUG_UART_CLOCK=24000000
++CONFIG_DEBUG_UART=y
++CONFIG_BOOTDELAY=1
++CONFIG_USE_BOOTARGS=y
++CONFIG_BOOTARGS="console=ttyS1,115200n8 console=tty1 root=/dev/mmcblk1p2 rootwait quiet systemd.show_status=yes"
++CONFIG_BOOTCOMMAND="sd"
++CONFIG_USE_PREBOOT=y
++CONFIG_PREBOOT="setenv stdin serial,tc3589x-keyb"
++CONFIG_DEFAULT_FDT_FILE="rockchip/rk3128-pomera-dm250.dtb"
++# CONFIG_DISPLAY_CPUINFO is not set
++CONFIG_DISPLAY_BOARDINFO_LATE=y
++CONFIG_CMD_GPIO=y
++CONFIG_CMD_I2C=y
++CONFIG_CMD_MMC=y
++CONFIG_CMD_POWEROFF=y
++CONFIG_CMD_PMIC=y
++CONFIG_CMD_REGULATOR=y
++CONFIG_CMD_USB_MASS_STORAGE=y
++# CONFIG_CMD_SETEXPR is not set
++CONFIG_CMD_TIME=y
++# CONFIG_CMD_BOOTDEV is not set
++# CONFIG_CMD_BOOTMETH is not set
++# CONFIG_BOOTMETH_VBE is not set
++CONFIG_OF_EMBED=y
++CONFIG_ENV_IS_IN_FAT=y
++CONFIG_ENV_FAT_DEVICE_AND_PART="1:1"
++CONFIG_BUTTON=y
++CONFIG_BUTTON_GPIO=y
++CONFIG_ROCKCHIP_GPIO=y
++CONFIG_SYS_I2C_ROCKCHIP=y
++CONFIG_DM_KEYBOARD=y
++CONFIG_TC3589X_KEYB=y
++# CONFIG_ROCKCHIP_EFUSE is not set
++CONFIG_MMC_DW=y
++CONFIG_MMC_DW_ROCKCHIP=y
++CONFIG_PHY_ROCKCHIP_INNO_DSIDPHY=y
++CONFIG_PHY_ROCKCHIP_INNO_USB2=y
++CONFIG_DM_PMIC=y
++CONFIG_PMIC_RK8XX=y
++CONFIG_REGULATOR_RK8XX=y
++CONFIG_PWM_ROCKCHIP=y
++CONFIG_DEBUG_UART_SHIFT=2
++CONFIG_SYS_NS16550_MEM32=y
++CONFIG_SYSRESET=y
++CONFIG_USB=y
++CONFIG_USB_DWC2=y
++CONFIG_USB_GADGET=y
++CONFIG_USB_GADGET_DWC2_OTG=y
++CONFIG_VIDEO=y
++CONFIG_VIDEO_LOGO=y
++CONFIG_DISPLAY=y
++CONFIG_VIDEO_ROCKCHIP=y
++CONFIG_VIDEO_ROCKCHIP_MAX_XRES=1024
++CONFIG_VIDEO_ROCKCHIP_MAX_YRES=600
++CONFIG_DISPLAY_ROCKCHIP_LVDS=y
++CONFIG_VIDEO_DT_SIMPLEFB=y
++# CONFIG_USB_HOST is not set
++# CONFIG_TOOLS_MKEFICAPSULE is not set
++# CONFIG_FASTBOOT is not set
++# CONFIG_USB_FUNCTION_FASTBOOT is not set
++# CONFIG_FIT is not set
++# CONFIG_BOOTSTD_FULL is not set
++# CONFIG_MISC_INIT_R is not set
++# CONFIG_USB_STORAGE is not set
++# CONFIG_USB_DWC2 is not set
++CONFIG_USB_GADGET_DOWNLOAD=y
++CONFIG_ERRNO_STR=y
++CONFIG_DM_USB_GADGET=y
++# CONFIG_MISC is not set
+diff --git a/drivers/input/tc3589x_keyb.c b/drivers/input/tc3589x_keyb.c
+index eda1dcbde6..974d6066af 100644
+--- a/drivers/input/tc3589x_keyb.c
++++ b/drivers/input/tc3589x_keyb.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2026 joshua stein <jcs@jcs.org>
+  */
+ 
++#include <button.h>
+ #include <dm.h>
+ #include <i2c.h>
+ #include <input.h>
+@@ -79,12 +80,26 @@ struct tc3589x_keyb_priv {
+ 	u16 states[TC3589x_MAX_ROWS + 1];
+ };
+ 
++/*
++ * Modifier keys that are not in the TC3589x matrix but wired to GPIOs
++ * (gpio-keys buttons). They are read as one extra row after the matrix.
++ */
++static const char * const tc3589x_button_labels[] = {
++	"Left Alt", "Left Control", "Left Shift", "Right Shift", "Home",
++};
++
++static const u16 tc3589x_button_codes[] = {
++	KEY_LEFTALT, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_RIGHTSHIFT, KEY_HOME,
++};
++
+ static int tc3589x_read_keys(struct input_config *input)
+ {
+ 	struct udevice *dev = input->dev;
+ 	struct tc3589x_keyb_priv *priv = dev_get_priv(dev);
+ 	u16 new_states[TC3589x_MAX_ROWS + 1] = { 0 };
++	struct udevice *button;
+ 	int col, row, i, was, now, code, ret;
++	u16 buttons = 0;
+ 	u8 k;
+ 
+ 	/* clear keyboard interrupt before reading keys */
+@@ -103,16 +118,33 @@ static int tc3589x_read_keys(struct input_config *input)
+ 		row = (k & TC3589x_KBDCODE_ROW_MASK) >>
+ 		    TC3589x_KBDCODE_ROW_SHIFT;
+ 		col = k & TC3589x_KBDCODE_COL_MASK;
++		if (row >= priv->rows || col >= priv->cols)
++			continue;
+ 		new_states[row] |= (1 << col);
+ 	}
+ 
++	/* the GPIO modifier keys become the row after the matrix */
++	for (i = 0; i < ARRAY_SIZE(tc3589x_button_labels); i++) {
++		if (button_get_by_label(tc3589x_button_labels[i], &button))
++			continue;
++		if (button_get_state(button) == BUTTON_ON)
++			buttons |= 1 << i;
++	}
++	new_states[priv->rows] = buttons;
++
+ 	/* collect state changes */
+-	for (row = 0; row < priv->rows; row++) {
++	for (row = 0; row <= priv->rows; row++) {
+ 		for (col = 0; col < priv->cols; col++) {
+ 			was = priv->states[row] & (1 << col);
+ 			now = new_states[row] & (1 << col);
+ 
+-			code = priv->keymap[row][col];
++			if (row == priv->rows) {
++				if (col >= ARRAY_SIZE(tc3589x_button_codes))
++					continue;
++				code = tc3589x_button_codes[col];
++			} else {
++				code = priv->keymap[row][col];
++			}
+ 			if (code == 0)
+ 				continue;
+ 
+@@ -277,7 +309,9 @@ static int tc3589x_keyb_probe(struct udevice *dev)
+ 	/* set up input layer */
+ 	input->dev = dev;
+ 	input->read_keys = tc3589x_read_keys;
+-	input_add_tables(input, false);
++	ret = input_add_tables(input, false);
++	if (ret)
++		return ret;
+ 
+ 	strcpy(sdev->name, "tc3589x-keyb");
+ 	ret = input_stdio_register(sdev);
+diff --git a/drivers/power/pmic/rk8xx.c b/drivers/power/pmic/rk8xx.c
+index 64202dac3c..95b71d2fe4 100644
+--- a/drivers/power/pmic/rk8xx.c
++++ b/drivers/power/pmic/rk8xx.c
+@@ -15,56 +15,6 @@
+ #include <spi.h>
+ #include <sysreset.h>
+ 
+-static void rk818_init_charger(struct udevice *dev)
+-{
+-	int val;
+-
+-	/* Enable gas gauge so battery detection works */
+-	val = pmic_reg_read(dev, REG_GGCON);
+-	if (val >= 0)
+-		pmic_reg_write(dev, REG_GGCON, val | BIT(0) | BIT(3));
+-
+-	/* Check battery presence */
+-	val = pmic_reg_read(dev, REG_GGSTS);
+-	if (val >= 0 && !(val & BIT(7))) {
+-		/* GGSTS says no battery; check voltage as fallback */
+-		int volh = pmic_reg_read(dev, REGH_BAT_VOL);
+-		int voll = pmic_reg_read(dev, REGL_BAT_VOL);
+-
+-		if (volh <= 0 && voll <= 0)
+-			return;
+-	}
+-
+-	/*
+-	 * Configure charging: 4.2V / 1000mA.
+-	 * Without this, the PMIC only trickle-charges and the power
+-	 * budget with the screen on drains the battery.
+-	 */
+-	pmic_reg_write(dev, REG1_CHRG_CTRL,
+-		       BIT(7) |		/* charge enable */
+-		       0x30 |		/* 4.2V charge voltage */
+-		       0x00);		/* 1000mA charge current */
+-
+-	/* Digital termination, 150mA threshold */
+-	pmic_reg_write(dev, REG2_CHRG_CTRL,
+-		       BIT(5) |		/* digital termination */
+-		       BIT(6));		/* 150mA */
+-
+-	/* Trickle charge 60min, CC/CV timeout 5h */
+-	pmic_reg_write(dev, REG3_CHRG_CTRL,
+-		       BIT(0) |		/* trickle enable */
+-		       BIT(1) |		/* 60 min trickle */
+-		       BIT(3) |		/* CC/CV enable */
+-		       BIT(4));		/* 5h CC/CV timeout */
+-
+-	/* USB input: 2A current limit, 4.4V voltage limit */
+-	pmic_reg_write(dev, REG_USB_CTRL,
+-		       0x07 |		/* 2000mA input current */
+-		       (4 << 4));	/* 4.4V input voltage */
+-
+-	printf("RK818: battery charging enabled\n");
+-}
+-
+ static int rk8xx_sysreset_request(struct udevice *dev, enum sysreset_t type)
+ {
+ 	struct rk8xx_priv *priv = dev_get_priv(dev->parent);
+@@ -336,8 +286,6 @@ static int rk8xx_probe(struct udevice *dev)
+ 	case RK818_ID:
+ 		on_source = RK8XX_ON_SOURCE;
+ 		off_source = RK8XX_OFF_SOURCE;
+-		if (priv->variant == RK818_ID)
+-			rk818_init_charger(dev);
+ 		break;
+ 	case RK809_ID:
+ 	case RK817_ID:
+diff --git a/drivers/video/rockchip/rk3126_lvds.c b/drivers/video/rockchip/rk3126_lvds.c
+index e55334a20e..e1346c3061 100644
+--- a/drivers/video/rockchip/rk3126_lvds.c
++++ b/drivers/video/rockchip/rk3126_lvds.c
+@@ -104,24 +104,28 @@ static int rk3126_lvds_enable(struct udevice *dev, int panel_bpp,
+ 			      const struct display_timing *edid)
+ {
+ 	struct rk3126_lvds_priv *priv = dev_get_priv(dev);
+-	u32 val;
++	const char *mapping;
++	u32 fmt;
+ 	int ret;
+ 
+-	/*
+-	 * Configure GRF_LVDS_CON0 per vendor rk312x_lcdc.h.
+-	 * LVDS_8BIT_3 (=2) is the JEIDA-24 format.
+-	 */
+-	val = LVDS_CON0_LVDSMODE_EN |
+-	      LVDS_CON0_DATA_SEL(0) |
+-	      LVDS_CON0_OUTPUT_FORMAT(LVDS_FMT_8BIT_3) |
+-	      LVDS_CON0_MSBSEL |
+-	      LVDS_CON0_LANE0_EN |
+-	      LVDS_CON0_FORCEX_EN;
+-
+-	/* Write with mask in upper 16 bits */
+-	writel(val | (0xffff << 16), priv->grf + RK3126_GRF_LVDS_CON0);
+-
+-	/* Set PHY mode to LVDS and power on */
++	/* The LVDS bit order comes from the panel's data-mapping */
++	mapping = ofnode_read_string(dev_ofnode(priv->panel), "data-mapping");
++	if (!mapping)
++		return -EINVAL;
++	if (!strcmp(mapping, "jeida-18"))
++		fmt = LVDS_FMT_8BIT_3;
++	else if (!strcmp(mapping, "jeida-24"))
++		fmt = LVDS_FMT_8BIT_2;
++	else if (!strcmp(mapping, "vesa-24"))
++		fmt = LVDS_FMT_8BIT_1;
++	else
++		return -EINVAL;
++
++	writel(LVDS_CON0_LVDSMODE_EN | LVDS_CON0_DATA_SEL(0) |
++	       LVDS_CON0_OUTPUT_FORMAT(fmt) | LVDS_CON0_MSBSEL |
++	       LVDS_CON0_LANE0_EN | LVDS_CON0_FORCEX_EN | (0x3cf << 16),
++	       priv->grf + RK3126_GRF_LVDS_CON0);
++
+ 	ret = generic_phy_set_mode(&priv->phy, PHY_MODE_LVDS, 0);
+ 	if (ret)
+ 		return ret;
+@@ -130,41 +134,12 @@ static int rk3126_lvds_enable(struct udevice *dev, int panel_bpp,
+ 	if (ret)
+ 		return ret;
+ 
+-	/*
+-	 * Drive panel enable GPIO and backlight directly.
+-	 * panel enable-gpios = GPIO0_C0 (pin 24)
+-	 * backlight enable-gpios = GPIO0_C3 (pin 27)
+-	 * PWM0 at 0x20050000, period=0x61a8 (25000ns = 40kHz)
+-	 */
+-#define GPIO0_BASE	0x2007c000
+-#define GPIO_SWPORTA_DR		0x00
+-#define GPIO_SWPORTA_DDR	0x04
+-#define PWM0_BASE	0x20050000
+-#define PWM_CNT		0x00
+-#define PWM_PERIOD	0x04
+-#define PWM_DUTY	0x08
+-#define PWM_CTRL	0x0c
+-	{
+-		void __iomem *gpio0 = (void __iomem *)GPIO0_BASE;
+-		void __iomem *pwm0 = (void __iomem *)PWM0_BASE;
+-		u32 val;
+-
+-		/* Set GPIO0_C0 (pin 24) and GPIO0_C3 (pin 27) as output high */
+-		val = readl(gpio0 + GPIO_SWPORTA_DDR);
+-		val |= BIT(24) | BIT(27);
+-		writel(val, gpio0 + GPIO_SWPORTA_DDR);
+-
+-		val = readl(gpio0 + GPIO_SWPORTA_DR);
+-		val |= BIT(24) | BIT(27);
+-		writel(val, gpio0 + GPIO_SWPORTA_DR);
+-
+-		/* Configure PWM0: period=25000, duty=12500 (50%), enable */
+-		writel(25000, pwm0 + PWM_PERIOD);
+-		writel(12500, pwm0 + PWM_DUTY);
+-		writel(BIT(0) | BIT(3), pwm0 + PWM_CTRL); /* enable, continuous */
+-	}
++	/* Panel power and backlight through the panel and backlight drivers */
++	ret = panel_enable_backlight(priv->panel);
++	if (ret)
++		generic_phy_power_off(&priv->phy);
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static int rk3126_lvds_of_to_plat(struct udevice *dev)
+diff --git a/drivers/video/rockchip/rk3126_vop.c b/drivers/video/rockchip/rk3126_vop.c
+index 3e92b0c678..912ec24bd2 100644
+--- a/drivers/video/rockchip/rk3126_vop.c
++++ b/drivers/video/rockchip/rk3126_vop.c
+@@ -172,6 +172,12 @@ static void rk3126_enable(struct udevice *dev, ulong fbbase,
+ 
+ 	/* Commit all shadow registers */
+ 	writel(0x01, base + REG_CFG_DONE);
++
++	/* Pulse the dclk reset so the new timing starts cleanly */
++	if (reset_assert(dclk_rst))
++		return;
++	udelay(20);
++	reset_deassert(dclk_rst);
+ }
+ 
+ static void rk3126_enable_output(struct udevice *dev, enum vop_modes mode)
+diff --git a/include/configs/pomera_dm250.h b/include/configs/pomera_dm250.h
+new file mode 100644
+index 0000000000..8806ad169d
+--- /dev/null
++++ b/include/configs/pomera_dm250.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++
++#ifndef __POMERA_DM250_H
++#define __POMERA_DM250_H
++
++#include "rockchip-common.h"
++
++#define CFG_SYS_HZ_CLOCK		24000000
++
++#define CFG_IRAM_BASE		0x10080000
++
++#define CFG_SYS_SDRAM_BASE		0x60000000
++#define SDRAM_MAX_SIZE			0x80000000
++
++#define ENV_MEM_LAYOUT_SETTINGS \
++	"scriptaddr=0x60500000\0" \
++	"pxefile_addr_r=0x60600000\0" \
++	"fdt_addr_r=0x61f00000\0" \
++	"kernel_addr_r=0x62000000\0" \
++	"ramdisk_addr_r=0x64000000\0"
++
++/* No fdt_high/initrd_high: the sd command places the kernel and DTB itself. */
++#define CFG_EXTRA_ENV_SETTINGS \
++	ENV_MEM_LAYOUT_SETTINGS \
++	"fdt_file=" CONFIG_DEFAULT_FDT_FILE "\0" \
++	"partitions=" PARTS_DEFAULT \
++	"boot_targets=mmc1\0" \
++	"stdin=serial,tc3589x-keyb\0" \
++	"stdout=serial,vidconsole\0" \
++	"stderr=serial,vidconsole\0"
++
++#endif
+-- 
+2.47.3
+

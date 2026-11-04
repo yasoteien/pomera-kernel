@@ -1,0 +1,53 @@
+From b24503d69cbd30ff5a6a58685086c569c44c347f Mon Sep 17 00:00:00 2001
+From: joshua stein <jcs@jcs.org>
+Date: Wed, 16 Sep 2026 22:14:20 -0500
+Subject: [PATCH 31/46] arm: armv7: move ARMV7_SET_CORTEX_SMPEN block out of
+ cpu_init_cp15
+
+This should run regardless of SKIP_LOWLEVEL_INIT if that option is
+enabled.
+---
+ arch/arm/cpu/armv7/start.S | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/arch/arm/cpu/armv7/start.S b/arch/arm/cpu/armv7/start.S
+index 833486817f..94a70c62c0 100644
+--- a/arch/arm/cpu/armv7/start.S
++++ b/arch/arm/cpu/armv7/start.S
+@@ -115,6 +115,16 @@ switch_to_hypervisor_ret:
+ #endif
+ 
+ 	/* the mask ROM code should have PLL and others stable */
++#if CONFIG_IS_ENABLED(ARMV7_SET_CORTEX_SMPEN)
++	/*
++	 * The Arm Cortex-A7 TRM says this bit must be enabled before
++	 * "any cache or TLB maintenance operations are performed".
++	 */
++	mrc	p15, 0, r0, c1, c0, 1	@ read auxilary control register
++	orr	r0, r0, #1 << 6		@ set SMP bit to enable coherency
++	mcr	p15, 0, r0, c1, c0, 1	@ write auxilary control register
++#endif
++
+ #if !CONFIG_IS_ENABLED(SKIP_LOWLEVEL_INIT)
+ #ifdef CONFIG_CPU_V7A
+ 	bl	cpu_init_cp15
+@@ -202,16 +212,6 @@ ENDPROC(switch_to_hypervisor)
+  *************************************************************************/
+ ENTRY(cpu_init_cp15)
+ 
+-#if CONFIG_IS_ENABLED(ARMV7_SET_CORTEX_SMPEN)
+-	/*
+-	 * The Arm Cortex-A7 TRM says this bit must be enabled before
+-	 * "any cache or TLB maintenance operations are performed".
+-	 */
+-	mrc	p15, 0, r0, c1, c0, 1	@ read auxilary control register
+-	orr	r0, r0, #1 << 6		@ set SMP bit to enable coherency
+-	mcr	p15, 0, r0, c1, c0, 1	@ write auxilary control register
+-#endif
+-
+ 	/*
+ 	 * Invalidate L1 I/D
+ 	 */
+-- 
+2.47.3
+

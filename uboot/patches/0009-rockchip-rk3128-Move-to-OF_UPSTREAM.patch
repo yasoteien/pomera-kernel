@@ -1,0 +1,79 @@
+From dad2b17da9e0b8c9de7d5f80f341a951568452a1 Mon Sep 17 00:00:00 2001
+From: Alex Bee <knaerzche@gmail.com>
+Date: Mon, 10 Feb 2025 14:21:55 +0100
+Subject: [PATCH 09/46] rockchip: rk3128: Move to OF_UPSTREAM
+
+Move RK3128 to OF_UPSTREAM. Properties that were used by evb-rk3128 and have
+only been present in the former u-boot rk3128.dtsi have been moved to
+rk3128-evb-u-boot.dtsi.
+
+Signed-off-by: Alex Bee <knaerzche@gmail.com>
+---
+ arch/arm/dts/rk3128-evb-u-boot.dtsi |  9 +++++++++
+ arch/arm/dts/rk3128-u-boot.dtsi     | 16 ++++++++++++++++
+ arch/arm/mach-rockchip/Kconfig      |  1 +
+ 3 files changed, 26 insertions(+)
+
+diff --git a/arch/arm/dts/rk3128-evb-u-boot.dtsi b/arch/arm/dts/rk3128-evb-u-boot.dtsi
+index 2f20cacc7a..872e084b62 100644
+--- a/arch/arm/dts/rk3128-evb-u-boot.dtsi
++++ b/arch/arm/dts/rk3128-evb-u-boot.dtsi
+@@ -5,3 +5,12 @@
+ &emmc {
+ 	bootph-all;
+ };
++
++&uart2 {
++	bootph-all;
++	status = "okay";
++};
++
++&uart2_xfer {
++	bootph-all;
++};
+diff --git a/arch/arm/dts/rk3128-u-boot.dtsi b/arch/arm/dts/rk3128-u-boot.dtsi
+index 4d8efa179d..61f612e63c 100644
+--- a/arch/arm/dts/rk3128-u-boot.dtsi
++++ b/arch/arm/dts/rk3128-u-boot.dtsi
+@@ -22,6 +22,18 @@
+ 	bootph-all;
+ };
+ 
++&pcfg_pull_default {
++	bootph-all;
++};
++
++&pcfg_pull_none {
++	bootph-all;
++};
++
++&pinctrl {
++	bootph-all;
++};
++
+ &sdmmc {
+ 	fifo-mode;
+ };
+@@ -37,3 +49,7 @@
+ &uart2 {
+ 	clock-frequency = <24000000>;
+ };
++
++&xin24m {
++	bootph-all;
++};
+diff --git a/arch/arm/mach-rockchip/Kconfig b/arch/arm/mach-rockchip/Kconfig
+index d92fcae2bb..04f4a6f939 100644
+--- a/arch/arm/mach-rockchip/Kconfig
++++ b/arch/arm/mach-rockchip/Kconfig
+@@ -67,6 +67,7 @@ config ROCKCHIP_RK3128
+ 	select CPU_V7A
+ 	imply OF_UPSTREAM
+ 	imply ROCKCHIP_COMMON_BOARD
++	imply OF_UPSTREAM
+ 	help
+ 	  The Rockchip RK3128 is a ARM-based SoC with a quad-core Cortex-A7
+ 	  including NEON and GPU, Mali-400 graphics, several DDR3 options
+-- 
+2.47.3
+

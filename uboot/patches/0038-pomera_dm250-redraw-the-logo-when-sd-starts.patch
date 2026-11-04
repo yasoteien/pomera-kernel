@@ -1,0 +1,88 @@
+From 7817f9e207afd79760db71691830e3ad0cbe5957 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:27:34 +0900
+Subject: [PATCH 38/46] pomera_dm250: redraw the logo when sd starts
+
+The autoboot countdown line starts with "\e[2K" and the video
+console clears the whole text row, which runs through the logo at the
+top right and leaves a black band across it (the split logo seen on
+the device). Redraw the logo at the start of the sd command.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ board/kingjim/pomera_dm250/Kconfig        | 10 ++++++++++
+ board/kingjim/pomera_dm250/pomera_dm250.c | 21 +++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/board/kingjim/pomera_dm250/Kconfig b/board/kingjim/pomera_dm250/Kconfig
+index 5d31dcba6f..78d8ef8e4e 100644
+--- a/board/kingjim/pomera_dm250/Kconfig
++++ b/board/kingjim/pomera_dm250/Kconfig
+@@ -9,4 +9,14 @@ config SYS_VENDOR
+ config SYS_CONFIG_NAME
+ 	default "pomera_dm250"
+ 
++config POMERA_DM250_REDRAW_LOGO
++	bool "Redraw the logo when the sd command starts"
++	depends on VIDEO_LOGO
++	default y
++	help
++	  The autoboot countdown starts its line with ANSI "clear entire
++	  line", which the video console implements by painting the whole
++	  text row, logo included. The countdown row crosses the logo, so
++	  without this the logo shows a black band until the kernel starts.
++
+ endif
+diff --git a/board/kingjim/pomera_dm250/pomera_dm250.c b/board/kingjim/pomera_dm250/pomera_dm250.c
+index c9c2f45c2e..03536ea37a 100644
+--- a/board/kingjim/pomera_dm250/pomera_dm250.c
++++ b/board/kingjim/pomera_dm250/pomera_dm250.c
+@@ -20,9 +20,11 @@
+ #include <errno.h>
+ #include <generic-phy.h>
+ #include <hang.h>
++#include <mapmem.h>
+ #include <memalign.h>
+ #include <mmc.h>
+ #include <stdio.h>
++#include <video.h>
+ #include <dm/root.h>
+ #include <linux/delay.h>
+ #include <linux/libfdt.h>
+@@ -252,6 +254,23 @@ static int dm250_load_kernel(struct blk_desc *desc, u32 *sizep)
+ 	return 0;
+ }
+ 
++/*
++ * Draw the logo again. The autoboot countdown clears its whole text row
++ * ("\e[2K"), and that row runs through the logo.
++ */
++static void dm250_redraw_logo(void)
++{
++	struct udevice *vid;
++
++	if (!IS_ENABLED(CONFIG_POMERA_DM250_REDRAW_LOGO))
++		return;
++	if (uclass_first_device_err(UCLASS_VIDEO, &vid))
++		return;
++	video_bmp_display(vid, map_to_sysmem(video_get_u_boot_logo()),
++			  CONFIG_VIDEO_LOGO_X, CONFIG_VIDEO_LOGO_Y, true);
++	video_sync(vid, true);
++}
++
+ static int do_dm250_boot(struct cmd_tbl *cmdtp, int flag, int argc,
+ 			 char *const argv[])
+ {
+@@ -273,6 +292,8 @@ static int do_dm250_boot(struct cmd_tbl *cmdtp, int flag, int argc,
+ 	} else if (strcmp(name, "sd")) {
+ 		return CMD_RET_USAGE;
+ 	}
++	if (!legacy)
++		dm250_redraw_logo();
+ 	if (legacy)
+ 		printf("DM250: boot from %s (mmc %d), legacy U-Boot\n",
+ 		       name, devnum);
+-- 
+2.47.3
+

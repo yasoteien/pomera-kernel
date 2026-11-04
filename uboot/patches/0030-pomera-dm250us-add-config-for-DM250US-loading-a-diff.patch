@@ -1,0 +1,23 @@
+From 67a8438db750b77d6683555d9c453d08dc57a55c Mon Sep 17 00:00:00 2001
+From: joshua stein <jcs@jcs.org>
+Date: Tue, 12 May 2026 14:11:07 -0500
+Subject: [PATCH 30/46] pomera-dm250us: add config for DM250US loading a
+ different dtb
+
+---
+ configs/pomera-dm250us_defconfig | 3 +++
+ 1 file changed, 3 insertions(+)
+ create mode 100644 configs/pomera-dm250us_defconfig
+
+diff --git a/configs/pomera-dm250us_defconfig b/configs/pomera-dm250us_defconfig
+new file mode 100644
+index 0000000000..9347176bfe
+--- /dev/null
++++ b/configs/pomera-dm250us_defconfig
+@@ -0,0 +1,3 @@
++#include <configs/pomera-dm250_defconfig>
++CONFIG_DEFAULT_DEVICE_TREE="rockchip/pomera-dm250us"
++CONFIG_DEFAULT_FDT_FILE="rockchip/pomera-dm250us.dtb"
+-- 
+2.47.3
+

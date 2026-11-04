@@ -1,0 +1,29 @@
+From f7e8dd5dcf9d2edc4f22bbdcdec03a2f508d3deb Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:27:35 +0900
+Subject: [PATCH 43/46] pomera_dm250: DTS comment: where the 154x86 mm panel
+ size comes from
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts b/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
+index 64f4ca0d67..41fb4fbd07 100644
+--- a/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
++++ b/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
+@@ -7,6 +7,9 @@
+  *  - backlight pwms polarity 1 -> 0 (normal, as in the kernel DTs)
+  *  - panel width-mm/height-mm 223x125 -> 154x86 (DM250 is 7.0-inch
+  *    1024x600; 154.21x85.92 mm is the usual 7-inch WSVGA active area)
++ *    The panel part number is unknown; the timing (DCLK 51.2 MHz, Htotal
++ *    1344, Vtotal 635) matches EJ070NA-01J / HSD070PFW1, whose active area
++ *    is 154.21x85.92 mm.
+  */
+ /dts-v1/;
+ 
+-- 
+2.47.3
+

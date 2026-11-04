@@ -1,11 +1,11 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 yasoteien
-# 作者の DTB に、RK818 の INT の結線の直しと充電 LED の節（gpio-leds）を当てる。
+# DM250 用 Debian 13 イメージの DTB に、RK818 の INT の結線の直しと充電 LED の節（gpio-leds）を当てる。
 #
 #   bash mk_leds.sh 入力.dtb 出力.dtb
 #
-# 1. RK818 の INT: 作者の DT は gpio1 の 9 番（GPIO1_B1）にしているが、実機の結線は
+# 1. RK818 の INT: イメージの DT は gpio1 の 9 番（GPIO1_B1）にしているが、実機の結線は
 #    gpio0 の 6 番（GPIO0_A6）、レベル Low。同じ長さの 2 か所の直しなので DTB の長さは変わらない。
 # 2. 充電 LED: 赤 GPIO1_B0、緑 GPIO1_B4（どちらも active high）。トリガーは自前の
 #    rk818 の充電ドライバが出す rk818-led-red / rk818-led-green。

@@ -1,0 +1,41 @@
+From 8af7d92e4b7547ca55ef56018c5858a2c1c29781 Mon Sep 17 00:00:00 2001
+From: joshua stein <jcs@jcs.org>
+Date: Tue, 3 Mar 2026 12:34:29 -0600
+Subject: [PATCH 22/46] rockchip: rk3128: Have ft_board_setup setup simplefb if
+ enabled
+
+---
+ arch/arm/mach-rockchip/rk3128/rk3128.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/arch/arm/mach-rockchip/rk3128/rk3128.c b/arch/arm/mach-rockchip/rk3128/rk3128.c
+index fa409d7615..2354cfdf0c 100644
+--- a/arch/arm/mach-rockchip/rk3128/rk3128.c
++++ b/arch/arm/mach-rockchip/rk3128/rk3128.c
+@@ -4,6 +4,7 @@
+ #include <asm/arch-rockchip/bootrom.h>
+ #include <asm/arch-rockchip/grf_rk3128.h>
+ #include <asm/arch-rockchip/hardware.h>
++#include <fdt_simplefb.h>
+ 
+ #define GRF_BASE	0x20008000
+ 
+@@ -146,3 +147,15 @@ int arch_cpu_init(void)
+ 	return 0;
+ }
+ #endif
++
++#if defined(CONFIG_OF_BOARD_SETUP)
++int ft_board_setup(void *blob, struct bd_info *bd)
++{
++	if (IS_ENABLED(CONFIG_FDT_SIMPLEFB)) {
++		fdt_simplefb_add_node(blob);
++		fdt_simplefb_enable_and_mem_rsv(blob);
++	}
++
++	return 0;
++}
++#endif
+-- 
+2.47.3
+

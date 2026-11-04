@@ -10,6 +10,11 @@
 #   CHANGELOG の見出し `## [YYYY.MM.DD] - YYYY-MM-DD` と同じ）。既定は組む日（日本時間）。同じ週の出し直しは
 #   POMERA_META_VER=2026.11.04.1 のように渡す。<版> の印は数字で始まる物（5jk）と英字の物（st6）が dpkg で
 #   思った順に並ばないので、メタの版には使わない。
+#   U-Boot も組にする版（tools 0.7 から）は POMERA_UBOOT=<uboot.img（4MiB）> と POMERA_UBOOT_KNOWN=<uboot-known.sha256> を渡す
+#   （上書きしてよい U-Boot の一覧。行は「sha256 名前 [table]」で、table は表を読む U-Boot。uboot.img の sha は table の行で載る事）。
+#   渡さない版は U-Boot に触らない（今までどおり）。
+#   メタだけを組む（試験で合格した版のパッケージを組み直さずに、出し直しのメタだけを作る）:
+#     POMERA_META_VER=2026.11.04.2 bash build-deb.sh --meta <版> [組み直しの番号]
 #   例: bash build-deb.sh 6.18.60-st6 ../krnl-6.18.60-st6-12M.bin ../modules-6.18.60-st6.tgz \
 #         ../wk-rk818/dt5f/rsce-alldma-rk818int-leds.bin 0.1
 #
@@ -19,7 +24,12 @@
 #   pomera-kernel_<YYYY.MM.DD>_all.deb         apt upgrade で新しい版に追従するための空のパッケージ（版は公開の日付）
 # 素材は試験 SD で合格した物をそのまま使う（組み直さない）。
 set -euo pipefail
-V=${1:?版}; KRNL=${2:?KRNL}; TGZ=${3:?modules.tgz}; RSCE=${4:?RSCE}; TV=${5:-0.1}; REV=${6:-}
+META_ONLY=0
+if [ "${1:-}" = --meta ]; then
+	META_ONLY=1; V=${2:?版}; REV=${3:-}; KRNL=; TGZ=; RSCE=; TV=
+else
+	V=${1:?版}; KRNL=${2:?KRNL}; TGZ=${3:?modules.tgz}; RSCE=${4:?RSCE}; TV=${5:-0.1}; REV=${6:-}
+fi
 PV=$V${REV:++$REV}   # パッケージの版
 MV=${POMERA_META_VER:-$(TZ=Asia/Tokyo date +%Y.%m.%d)}   # メタの版
 [[ "$MV" =~ ^20[0-9]{2}\.[01][0-9]\.[0-3][0-9](\.[0-9]+)?$ ]] || { echo "メタの版は YYYY.MM.DD[.N]: $MV" >&2; exit 1; }
@@ -27,9 +37,30 @@ MV=${POMERA_META_VER:-$(TZ=Asia/Tokyo date +%Y.%m.%d)}   # メタの版
 cd "$(dirname "$0")"
 TOP=$PWD
 [[ "$V" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]] || { echo "版の名前が違う: $V" >&2; exit 1; }
+[ $META_ONLY = 1 ] || {
 [ "$(stat -c %s "$KRNL")" = 12582912 ] && [ "$(head -c 4 "$KRNL")" = KRNL ] || { echo "$KRNL が 12MiB の KRNL でない" >&2; exit 1; }
 [ "$(stat -c %s "$RSCE")" = 1048576 ] && [ "$(head -c 4 "$RSCE")" = RSCE ] || { echo "$RSCE が 1MiB の RSCE でない" >&2; exit 1; }
+UB=${POMERA_UBOOT:-}; UBK=${POMERA_UBOOT_KNOWN:-}
+if [ -n "$UB" ]; then
+	[ -n "$UBK" ] || { echo "POMERA_UBOOT には POMERA_UBOOT_KNOWN も要る" >&2; exit 1; }
+	[ "$(stat -c %s "$UB")" = 4194304 ] || { echo "$UB が 4MiB でない" >&2; exit 1; }
+	for i in 0 1 2 3; do
+		[ "$(dd if="$UB" bs=8 count=1 iflag=skip_bytes skip=$(( i << 20 )) status=none)" = "LOADER  " ] ||
+			{ echo "$UB の $(( i + 1 )) 番目の写しが LOADER でない" >&2; exit 1; }
+	done
+	[ "$(for i in 0 1 2 3; do dd if="$UB" bs=1M skip=$i count=1 status=none | sha256sum; done | sort -u | wc -l)" = 1 ] ||
+		{ echo "$UB の 4 つの写しが同じでない" >&2; exit 1; }
+	awk -v h="$(sha256sum "$UB" | cut -d' ' -f1)" '$1 == h && $3 == "table" { f = 1 } END { exit !f }' "$UBK" ||
+		{ echo "$UB の sha256 が $UBK に table の行で無い" >&2; exit 1; }
+	# 公開ソースの組み立ての結果（uboot/public/uboot.img.sha256）と同じ物だけを入れる
+	# 公開の木では POMERA_UBOOT_SHA=<木>/uboot/uboot.img.sha256 を渡す
+	UBS=${POMERA_UBOOT_SHA:-$TOP/uboot/public/uboot.img.sha256}
+	[ "$(sha256sum < "$UB" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$UBS")" ] ||
+		{ echo "$UB が $UBS と違う（公開ソースから組んだ物でない）" >&2; exit 1; }
+fi
 tar -tzf "$TGZ" | grep -qv "^lib/modules/$V/\|^lib/modules/$V\$" && { echo "$TGZ に lib/modules/$V の外の物がある" >&2; exit 1; }
+true
+}
 # Maintainer: GitHub の noreply のアドレス（2026-11-04 のユーザーの決定。個人のアドレスは公開の物に書かない）。POMERA_MAINT で替えられる
 MAINT=${POMERA_MAINT:-yasoteien <263659156+yasoteien@users.noreply.github.com>}
 DATE=$(date -R)
@@ -45,32 +76,17 @@ docs() {  # $1 = パッケージの根, $2 = 名前
 md5() { (cd "$1" && find . -path ./DEBIAN -prune -o -type f -print0 | sort -z | xargs -0 md5sum | sed 's#  \./#  #') > "$1/DEBIAN/md5sums"; }
 size() { du -sk --exclude=DEBIAN "$1" | cut -f1; }
 
-# 受け入れる機種（tools/sbin/pomera-kernel の OK_MODELS・OK_COMPATS と同じ。変える時は両方）
-write_preinst() {  # $1 = DEBIAN の置き場
-cat > "$1/preinst" <<'EOF'
-#!/bin/sh
-set -e
-# 保証できるのは DM250 の日本版だけ。動いている DT の model と compatible が、並べた物と完全に一致した時だけ入れる
-case "$1" in install|upgrade)
-	model=$( { tr -d '\000' < /proc/device-tree/model; } 2>/dev/null || true)
-	compat=$( { tr '\000' ' ' < /proc/device-tree/compatible; } 2>/dev/null | sed 's/ $//' || true)
-	if [ "$model" = "King Jim Pomera DM250" ] && [ "$compat" = "kingjim,pomera-dm250 rockchip,rk3128" ]; then
-		exit 0
-	fi
-	echo "pomera-kernel: この機械には入れられない（保証できるのは King Jim Pomera DM250 の日本版だけ）" >&2
-	echo "  model:      ${model:-（読めない）}" >&2
-	echo "  compatible: ${compat:-（読めない）}" >&2
-	exit 1
-	;;
-esac
-exit 0
-EOF
-chmod 0755 "$1/preinst"
-}
+# 受け入れる機種の表と preinst は machine.sh が正本（pomera-uboot と共通）。pomera-kernel の中の表も同じかを見る
+# shellcheck source=machine.sh
+. "$TOP/machine.sh"
+check_machine_table "$TOP/tools/sbin/pomera-kernel" || exit 1
 
+if [ $META_ONLY = 0 ]; then
 # 1. pomera-kernel-tools
 T=work/tools; P=pomera-kernel-tools
 install -D -m 0755 tools/sbin/pomera-kernel "$T/usr/sbin/pomera-kernel"
+install -D -m 0644 tools/share/RESTORE.txt "$T/usr/lib/pomera-kernel/RESTORE.txt"
+install -D -m 0644 uboot/known.sha256 "$T/usr/lib/pomera-kernel/uboot-known.sha256"   # 一覧の正本は uboot/known.sha256
 install -D -m 0755 tools/libexec/hibernate-wireless "$T/usr/libexec/pomera-kernel/hibernate-wireless"
 install -D -m 0644 tools/systemd/pomera-kernel-trial.service "$T/usr/lib/systemd/system/pomera-kernel-trial.service"
 install -D -m 0644 tools/systemd/pomera-kernel-confirm.service "$T/usr/lib/systemd/system/pomera-kernel-confirm.service"
@@ -92,12 +108,19 @@ Priority: optional
 Homepage: https://github.com/yasoteien
 Description: Pomera DM250 kernel trial-boot tools
  Boots a newly installed kernel once with kexec and a hardware watchdog.
- If the trial boot reaches a healthy state, the kernel (KRNL at 12MiB) and
- the device tree (RSCE at 24MiB) are written to the SD card as a pair;
- otherwise the watchdog resets the board and the previous pair boots again.
+ If the trial boot reaches a healthy state, the kernel (KRNL), the device
+ tree (RSCE) and the U-Boot of that version are written to the SD card as a
+ set: KRNL and RSCE go to the unused one of two slots (A/B), a small table
+ tells U-Boot which slot to boot, so a power cut while writing leaves either
+ the previous or the new set. Otherwise the watchdog resets the board and the
+ previous set boots again.
  Also unloads the Wi-Fi and Bluetooth modules around hibernation.
+ .
+ Unofficial test release with no warranty; use at your own risk and copy
+ the SD card first. It has nothing to do with King Jim or the distributor
+ of the Debian image for the DM250. To go back: pomera-kernel rollback.
 EOF
-write_preinst "$T/DEBIAN"
+write_preinst "$T/DEBIAN" pomera-kernel
 cat > "$T/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
@@ -164,7 +187,13 @@ open(sys.argv[2], "wb").write(d[0x400:0x400 + n])
 print("dtb", n, "bytes")
 PY
 echo "$V" > "$I/usr/lib/pomera-kernel/$V/kernel.release"
-(cd "$I/usr/lib/pomera-kernel/$V" && sha256sum krnl-12M.bin rsce.bin dtb > sha256sums)
+if [ -n "$UB" ]; then
+	cp "$UB" "$I/usr/lib/pomera-kernel/$V/uboot.img"
+	cp "$UBK" "$I/usr/lib/pomera-kernel/$V/uboot-known.sha256"
+	(cd "$I/usr/lib/pomera-kernel/$V" && sha256sum krnl-12M.bin rsce.bin dtb uboot.img uboot-known.sha256 > sha256sums)
+else
+	(cd "$I/usr/lib/pomera-kernel/$V" && sha256sum krnl-12M.bin rsce.bin dtb > sha256sums)
+fi
 chmod 0644 "$I/usr/lib/pomera-kernel/$V"/*
 docs "$I" "$P" "$PV" "本家 6.18 longterm ＋ DM250 のパッチ（patches/series）。素材は試験 SD で合格した物" changelog.Debian.gz
 install -d "$I/DEBIAN"
@@ -185,8 +214,12 @@ Description: Linux $V for the King Jim Pomera DM250
  matching device tree in RSCE format. Nothing is written to the SD card at
  install time: the kernel is tried once on the next boot and confirmed by
  pomera-kernel-tools.
+ .
+ Unofficial test release with no warranty; use at your own risk and copy
+ the SD card first. It has nothing to do with King Jim or the distributor
+ of the Debian image for the DM250. To go back: pomera-kernel rollback.
 EOF
-write_preinst "$I/DEBIAN"
+write_preinst "$I/DEBIAN" pomera-kernel
 cat > "$I/DEBIAN/postinst" <<EOF
 #!/bin/sh
 set -e
@@ -231,7 +264,12 @@ chmod 0755 "$I/DEBIAN/postinst" "$I/DEBIAN/prerm" "$I/DEBIAN/postrm"
 md5 "$I"
 dpkg-deb --root-owner-group -Zxz --build "$I" "out/${P}_${PV}_armhf.deb" >/dev/null
 
+fi  # META_ONLY
+
 # 3. pomera-kernel（追従用）
+if [ -e "out/pomera-kernel_${MV}_all.deb" ]; then
+	echo "out/pomera-kernel_${MV}_all.deb はもうある。置き換えない（出し直しは POMERA_META_VER で版を上げる）" >&2; exit 1
+fi
 M=work/meta; P=pomera-kernel
 docs "$M" $P "$MV" "最新の pomera-kernel-<版> に追従する空のパッケージ" changelog.gz   # 版に - が無い native なので changelog.gz
 install -d "$M/DEBIAN"
@@ -248,6 +286,10 @@ Homepage: https://github.com/yasoteien
 Description: Latest Linux kernel for the King Jim Pomera DM250 (metapackage)
  Depends on the newest pomera-kernel-<version> package so that
  "apt upgrade" brings in new kernels.
+ .
+ Unofficial test release with no warranty; use at your own risk and copy
+ the SD card first. It has nothing to do with King Jim or the distributor
+ of the Debian image for the DM250. To go back: pomera-kernel rollback.
 EOF
 md5 "$M"
 dpkg-deb --root-owner-group -Zxz --build "$M" "out/${P}_${MV}_all.deb" >/dev/null

@@ -1,0 +1,210 @@
+From 3aeb78fd4b4e99e05c7c18a2afae9ef735d78972 Mon Sep 17 00:00:00 2001
+From: joshua stein <jcs@jcs.org>
+Date: Wed, 25 Mar 2026 12:37:43 -0500
+Subject: [PATCH 28/46] power: rk8xx: On RK818, enable battery charging if
+ battery present
+
+Also fix RK818 registers which were off by one.
+---
+ drivers/power/pmic/rk8xx.c |  52 +++++++++++++++++
+ include/power/rk8xx_pmic.h | 114 ++++++++++++++++++-------------------
+ 2 files changed, 109 insertions(+), 57 deletions(-)
+
+diff --git a/drivers/power/pmic/rk8xx.c b/drivers/power/pmic/rk8xx.c
+index 95b71d2fe4..64202dac3c 100644
+--- a/drivers/power/pmic/rk8xx.c
++++ b/drivers/power/pmic/rk8xx.c
+@@ -15,6 +15,56 @@
+ #include <spi.h>
+ #include <sysreset.h>
+ 
++static void rk818_init_charger(struct udevice *dev)
++{
++	int val;
++
++	/* Enable gas gauge so battery detection works */
++	val = pmic_reg_read(dev, REG_GGCON);
++	if (val >= 0)
++		pmic_reg_write(dev, REG_GGCON, val | BIT(0) | BIT(3));
++
++	/* Check battery presence */
++	val = pmic_reg_read(dev, REG_GGSTS);
++	if (val >= 0 && !(val & BIT(7))) {
++		/* GGSTS says no battery; check voltage as fallback */
++		int volh = pmic_reg_read(dev, REGH_BAT_VOL);
++		int voll = pmic_reg_read(dev, REGL_BAT_VOL);
++
++		if (volh <= 0 && voll <= 0)
++			return;
++	}
++
++	/*
++	 * Configure charging: 4.2V / 1000mA.
++	 * Without this, the PMIC only trickle-charges and the power
++	 * budget with the screen on drains the battery.
++	 */
++	pmic_reg_write(dev, REG1_CHRG_CTRL,
++		       BIT(7) |		/* charge enable */
++		       0x30 |		/* 4.2V charge voltage */
++		       0x00);		/* 1000mA charge current */
++
++	/* Digital termination, 150mA threshold */
++	pmic_reg_write(dev, REG2_CHRG_CTRL,
++		       BIT(5) |		/* digital termination */
++		       BIT(6));		/* 150mA */
++
++	/* Trickle charge 60min, CC/CV timeout 5h */
++	pmic_reg_write(dev, REG3_CHRG_CTRL,
++		       BIT(0) |		/* trickle enable */
++		       BIT(1) |		/* 60 min trickle */
++		       BIT(3) |		/* CC/CV enable */
++		       BIT(4));		/* 5h CC/CV timeout */
++
++	/* USB input: 2A current limit, 4.4V voltage limit */
++	pmic_reg_write(dev, REG_USB_CTRL,
++		       0x07 |		/* 2000mA input current */
++		       (4 << 4));	/* 4.4V input voltage */
++
++	printf("RK818: battery charging enabled\n");
++}
++
+ static int rk8xx_sysreset_request(struct udevice *dev, enum sysreset_t type)
+ {
+ 	struct rk8xx_priv *priv = dev_get_priv(dev->parent);
+@@ -286,6 +336,8 @@ static int rk8xx_probe(struct udevice *dev)
+ 	case RK818_ID:
+ 		on_source = RK8XX_ON_SOURCE;
+ 		off_source = RK8XX_OFF_SOURCE;
++		if (priv->variant == RK818_ID)
++			rk818_init_charger(dev);
+ 		break;
+ 	case RK809_ID:
+ 	case RK817_ID:
+diff --git a/include/power/rk8xx_pmic.h b/include/power/rk8xx_pmic.h
+index 913b6ebe6d..ea04099519 100644
+--- a/include/power/rk8xx_pmic.h
++++ b/include/power/rk8xx_pmic.h
+@@ -91,63 +91,63 @@ enum {
+ 	REG_DCDC_ILMAX			= 0x90,
+ 	REG_CHRG_COMP			= 0x9a,
+ 	REG_SUP_STS			= 0xa0,
+-	REG_USB_CTRL,
+-	REG1_CHRG_CTRL,
+-	REG2_CHRG_CTRL,
+-	REG3_CHRG_CTRL,
+-	REG_BAT_CTRL,
+-	REG_BAT_HTS_TS1,
+-	REG_BAT_LTS_TS1,
+-	REG_BAT_HTS_TS2,
+-	REG_BAT_LTS_TS2,
+-	REG_TS_CTRL,
+-	REG_ADC_CTRL,
+-	REG_ON_SOURCE,
+-	REG_OFF_SOURCE,
+-	REG_GGCON,
+-	REG_GGSTS,
+-	REG_FRAME_SMP_INTERV,
+-	REG_AUTO_SLP_CUR_THR,
+-	REG3_GASCNT_CAL,
+-	REG2_GASCNT_CAL,
+-	REG1_GASCNT_CAL,
+-	REG0_GASCNT_CAL,
+-	REG3_GASCNT,
+-	REG2_GASCNT,
+-	REG1_GASCNT,
+-	REG0_GASCNT,
+-	REGH_BAT_CUR_AVG,
+-	REGL_BAT_CUR_AVG,
+-	REGH_TS1_ADC,
+-	REGL_TS1_ADC,
+-	REGH_TS2_ADC,
+-	REGL_TS2_ADC,
+-	REGH_BAT_OCV,
+-	REGL_BAT_OCV,
+-	REGH_BAT_VOL,
+-	REGL_BAT_VOL,
+-	REGH_RELAX_ENTRY_THRES,
+-	REGL_RELAX_ENTRY_THRES,
+-	REGH_RELAX_EXIT_THRES,
+-	REGL_RELAX_EXIT_THRES,
+-	REGH_RELAX_VOL1,
+-	REGL_RELAX_VOL1,
+-	REGH_RELAX_VOL2,
+-	REGL_RELAX_VOL2,
+-	REGH_BAT_CUR_R_CALC,
+-	REGL_BAT_CUR_R_CALC,
+-	REGH_BAT_VOL_R_CALC,
+-	REGL_BAT_VOL_R_CALC,
+-	REGH_CAL_OFFSET,
+-	REGL_CAL_OFFSET,
+-	REG_NON_ACT_TIMER_CNT,
+-	REGH_VCALIB0,
+-	REGL_VCALIB0,
+-	REGH_VCALIB1,
+-	REGL_VCALIB1,
+-	REGH_IOFFSET,
+-	REGL_IOFFSET,
+-	REG_SOC,
++	REG_USB_CTRL			= 0xa1,
++	REG1_CHRG_CTRL			= 0xa3,
++	REG2_CHRG_CTRL			= 0xa4,
++	REG3_CHRG_CTRL			= 0xa5,
++	REG_BAT_CTRL			= 0xa6,
++	REG_BAT_HTS_TS1		= 0xa8,
++	REG_BAT_LTS_TS1		= 0xa9,
++	REG_BAT_HTS_TS2		= 0xaa,
++	REG_BAT_LTS_TS2		= 0xab,
++	REG_TS_CTRL			= 0xac,
++	REG_ADC_CTRL			= 0xad,
++	REG_ON_SOURCE			= 0xae,
++	REG_OFF_SOURCE			= 0xaf,
++	REG_GGCON			= 0xb0,
++	REG_GGSTS			= 0xb1,
++	REG_FRAME_SMP_INTERV		= 0xb2,
++	REG_AUTO_SLP_CUR_THR		= 0xb3,
++	REG3_GASCNT_CAL		= 0xb4,
++	REG2_GASCNT_CAL		= 0xb5,
++	REG1_GASCNT_CAL		= 0xb6,
++	REG0_GASCNT_CAL		= 0xb7,
++	REG3_GASCNT			= 0xb8,
++	REG2_GASCNT			= 0xb9,
++	REG1_GASCNT			= 0xba,
++	REG0_GASCNT			= 0xbb,
++	REGH_BAT_CUR_AVG		= 0xbc,
++	REGL_BAT_CUR_AVG		= 0xbd,
++	REGH_TS1_ADC			= 0xbe,
++	REGL_TS1_ADC			= 0xbf,
++	REGH_TS2_ADC			= 0xc0,
++	REGL_TS2_ADC			= 0xc1,
++	REGH_BAT_OCV			= 0xc2,
++	REGL_BAT_OCV			= 0xc3,
++	REGH_BAT_VOL			= 0xc4,
++	REGL_BAT_VOL			= 0xc5,
++	REGH_RELAX_ENTRY_THRES		= 0xc6,
++	REGL_RELAX_ENTRY_THRES		= 0xc7,
++	REGH_RELAX_EXIT_THRES		= 0xc8,
++	REGL_RELAX_EXIT_THRES		= 0xc9,
++	REGH_RELAX_VOL1		= 0xca,
++	REGL_RELAX_VOL1		= 0xcb,
++	REGH_RELAX_VOL2		= 0xcc,
++	REGL_RELAX_VOL2		= 0xcd,
++	REGH_BAT_CUR_R_CALC		= 0xce,
++	REGL_BAT_CUR_R_CALC		= 0xcf,
++	REGH_BAT_VOL_R_CALC		= 0xd0,
++	REGL_BAT_VOL_R_CALC		= 0xd1,
++	REGH_CAL_OFFSET		= 0xd2,
++	REGL_CAL_OFFSET		= 0xd3,
++	REG_NON_ACT_TIMER_CNT		= 0xd4,
++	REGH_VCALIB0			= 0xd5,
++	REGL_VCALIB0			= 0xd6,
++	REGH_VCALIB1			= 0xd7,
++	REGL_VCALIB1			= 0xd8,
++	REGH_IOFFSET			= 0xdd,
++	REGL_IOFFSET			= 0xde,
++	REG_SOC				= 0xe0,
+ 	REG3_REMAIN_CAP,
+ 	REG2_REMAIN_CAP,
+ 	REG1_REMAIN_CAP,
+-- 
+2.47.3
+

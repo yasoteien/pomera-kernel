@@ -1,0 +1,272 @@
+From 14dfc1c658af5c1e779fcd837a3989e107d4e578 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 16:03:06 +0900
+Subject: [PATCH 45/46] pomera_dm250: choose the KRNL/RSCE pair from a slot
+ table
+
+The pomera-kernel tools keep two pairs besides the one at 12/24 MiB
+(slot A at 32/44 MiB, slot B at 48/60 MiB) and a 512-byte table at 26
+and 27 MiB ("PKTB", version 1, number, slot, the slot's places, a
+name, CRC-32 at 508). sd uses the valid table with the higher number;
+if its pair does not load (KRNL magic, size or CRC, RSCE header or FDT),
+the other valid table's pair, then slot 0. A table whose places are
+not its slot's own is not valid. Without a valid table sd reads 12/24
+MiB as before, so a card without the tables boots as it did.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ board/kingjim/pomera_dm250/pomera_dm250.c | 152 +++++++++++++++++++---
+ 1 file changed, 132 insertions(+), 20 deletions(-)
+
+diff --git a/board/kingjim/pomera_dm250/pomera_dm250.c b/board/kingjim/pomera_dm250/pomera_dm250.c
+index 27658a305b..6b0f747de8 100644
+--- a/board/kingjim/pomera_dm250/pomera_dm250.c
++++ b/board/kingjim/pomera_dm250/pomera_dm250.c
+@@ -8,7 +8,9 @@
+  * (0x6020232c-0x6020285f in the author's image). Names are ours.
+  *
+  * "sd"   reads KRNL and the resource image (rk-kernel.dtb) from the
+- *        SD card and boots it with bootz.
++ *        SD card and boots it with bootz. Which pair it reads is chosen
++ *        by the slot table (see dm250_choose below); without a valid
++ *        table it reads the pair at 12/24 MiB, as the author's U-Boot.
+  * "emmc" loads the legacy U-Boot from the eMMC (LOADER at sector 0x4000),
+  *        turns the display off and jumps to it.
+  */
+@@ -28,6 +30,7 @@
+ #include <mmc.h>
+ #include <stdio.h>
+ #include <video.h>
++#include <u-boot/crc.h>
+ #include <video_console.h>
+ #include <dm/root.h>
+ #include <linux/delay.h>
+@@ -70,10 +73,41 @@ struct dm250_rsce_entry {
+ 
+ #define DM250_LEGACY_LBA	0x4000
+ #define DM250_LEGACY_MAX	(SZ_1M - SZ_2K)
+-#define DM250_KRNL_LBA		0x6000
+-#define DM250_KRNL_BLOCKS	0x6000
+-#define DM250_RSCE_LBA		0xc000
+-#define DM250_RSCE_BLOCKS	0x3000
++#define DM250_KRNL_BLOCKS	0x6000		/* 12 MiB */
++#define DM250_MIB		2048		/* blocks */
++
++/*
++ * Slot table: two 512-byte copies at 26 and 27 MiB, written by the
++ * pomera-kernel tools. The valid copy with the higher number names the
++ * pair to boot; if that pair does not load, the other valid copy's pair;
++ * then slot 0. Little endian; CRC-32 (IEEE) of bytes 0-507 at 508.
++ */
++#define DM250_TABLE_MIB0	26
++#define DM250_TABLE_MIB1	27
++#define DM250_TABLE_VERSION	1
++
++struct dm250_table {
++	char magic[4];			/* "PKTB" */
++	u32 version;
++	u32 seq;
++	u32 slot;			/* 0, 1 (A) or 2 (B) */
++	u32 krnl_mib;
++	u32 rsce_mib;
++	char name[32];			/* kernel version, for the screen */
++	u8 zero[452];
++	u32 crc32;
++};
++
++/* Where each slot's KRNL and RSCE are, and how big the RSCE may be */
++static const struct dm250_slot {
++	u32 krnl_mib;
++	u32 rsce_mib;
++	u32 rsce_blocks;
++} dm250_slots[] = {
++	{ 12, 24, 0x3000 },	/* slot 0: the author's place */
++	{ 32, 44, DM250_MIB },	/* slot A */
++	{ 48, 60, DM250_MIB },	/* slot B */
++};
+ 
+ #define DM250_VOP_BASE		0x1010e000
+ #define DM250_VOP_SYS_CTRL	0x00
+@@ -169,7 +203,7 @@ static int dm250_load_legacy(struct blk_desc *desc)
+ 	return 0;
+ }
+ 
+-static int dm250_load_dtb(struct blk_desc *desc)
++static int dm250_load_dtb(struct blk_desc *desc, lbaint_t lba, u32 max)
+ {
+ 	ALLOC_CACHE_ALIGN_BUFFER(u8, hbuf, 512);
+ 	ALLOC_CACHE_ALIGN_BUFFER(u8, ebuf, 512);
+@@ -178,7 +212,7 @@ static int dm250_load_dtb(struct blk_desc *desc)
+ 	u32 i, end, off, size;
+ 	int n, blocks, ret;
+ 
+-	ret = dm250_read(desc, DM250_RSCE_LBA, 1, hbuf);
++	ret = dm250_read(desc, lba, 1, hbuf);
+ 	if (ret)
+ 		return ret;
+ 	if (memcmp(hdr->magic, "RSCE", 4))
+@@ -193,14 +227,14 @@ static int dm250_load_dtb(struct blk_desc *desc)
+ 		return -EINVAL;
+ 	i = hdr->tbl_offset;
+ 	n = hdr->entry_num;
+-	if (!i || n > DM250_RSCE_BLOCKS - i)
++	if (!i || n > max - i)
+ 		return -EINVAL;
+ 
+ 	end = i + n;
+ 	do {
+ 		if (i == end)
+ 			return -ENOENT;
+-		ret = dm250_read(desc, DM250_RSCE_LBA + i, 1, ebuf);
++		ret = dm250_read(desc, lba + i, 1, ebuf);
+ 		if (ret)
+ 			return ret;
+ 		if (memcmp(ent->tag, "ENTR", 4))
+@@ -213,11 +247,10 @@ static int dm250_load_dtb(struct blk_desc *desc)
+ 	if (size < 40 || size > DM250_FDT_SIZE)
+ 		return -EFBIG;
+ 	blocks = DIV_ROUND_UP(size, 512);
+-	if (off < end || off >= DM250_RSCE_BLOCKS ||
+-	    blocks > DM250_RSCE_BLOCKS - off)
++	if (off < end || off >= max || blocks > max - off)
+ 		return -EINVAL;
+ 
+-	ret = dm250_read(desc, DM250_RSCE_LBA + off, blocks,
++	ret = dm250_read(desc, lba + off, blocks,
+ 			 (void *)DM250_FDT_ADDR);
+ 	if (ret)
+ 		return ret;
+@@ -225,7 +258,7 @@ static int dm250_load_dtb(struct blk_desc *desc)
+ 	return fdt_check_full((void *)DM250_FDT_ADDR, size);
+ }
+ 
+-static int dm250_load_kernel(struct blk_desc *desc, u32 *sizep)
++static int dm250_load_kernel(struct blk_desc *desc, lbaint_t lba, u32 *sizep)
+ {
+ 	ALLOC_CACHE_ALIGN_BUFFER(u32, hdr, 128);
+ 	u8 *k = (u8 *)DM250_KERNEL_ADDR;
+@@ -233,7 +266,7 @@ static int dm250_load_kernel(struct blk_desc *desc, u32 *sizep)
+ 	int blocks;
+ 	int ret;
+ 
+-	ret = dm250_read(desc, DM250_KRNL_LBA, 1, hdr);
++	ret = dm250_read(desc, lba, 1, hdr);
+ 	if (ret)
+ 		return ret;
+ 	if (memcmp(hdr, "KRNL", 4))
+@@ -247,7 +280,7 @@ static int dm250_load_kernel(struct blk_desc *desc, u32 *sizep)
+ 	if (blocks > DM250_KRNL_BLOCKS)
+ 		return -EFBIG;
+ 
+-	ret = dm250_read(desc, DM250_KRNL_LBA, blocks, k);
++	ret = dm250_read(desc, lba, blocks, k);
+ 	if (ret)
+ 		return ret;
+ 	if (dm250_crc32(k + 8, size) != get_unaligned_le32(k + 8 + size))
+@@ -259,6 +292,88 @@ static int dm250_load_kernel(struct blk_desc *desc, u32 *sizep)
+ 	return 0;
+ }
+ 
++/* Read one copy of the slot table; 0 if it is valid */
++static int dm250_read_table(struct blk_desc *desc, int i, struct dm250_table *t)
++{
++	ALLOC_CACHE_ALIGN_BUFFER(u8, buf, 512);
++	const struct dm250_slot *sl;
++	int ret;
++
++	ret = dm250_read(desc, (i ? DM250_TABLE_MIB1 : DM250_TABLE_MIB0) * DM250_MIB,
++			 1, buf);
++	if (ret)
++		return ret;
++	memcpy(t, buf, sizeof(*t));
++	if (memcmp(t->magic, "PKTB", 4) || t->version != DM250_TABLE_VERSION)
++		return -ENOENT;
++	if (crc32(0, buf, offsetof(struct dm250_table, crc32)) != t->crc32)
++		return -EBADMSG;
++	if (t->slot >= ARRAY_SIZE(dm250_slots))
++		return -EINVAL;
++	/* The places must be the slot's own, so a bad table cannot point elsewhere */
++	sl = &dm250_slots[t->slot];
++	if (t->krnl_mib != sl->krnl_mib || t->rsce_mib != sl->rsce_mib)
++		return -EINVAL;
++	t->name[sizeof(t->name) - 1] = '\0';
++
++	return 0;
++}
++
++/* Load the KRNL and the DTB of one slot */
++static int dm250_load_slot(struct blk_desc *desc, u32 slot, u32 *sizep)
++{
++	const struct dm250_slot *sl = &dm250_slots[slot];
++	int ret;
++
++	ret = dm250_load_kernel(desc, sl->krnl_mib * DM250_MIB, sizep);
++	if (!ret)
++		ret = dm250_load_dtb(desc, sl->rsce_mib * DM250_MIB, sl->rsce_blocks);
++
++	return ret;
++}
++
++/*
++ * Try the slots in order: the newer valid table's, the other valid
++ * table's, then slot 0. Returns the slot that loaded, or a negative error.
++ */
++static int dm250_choose(struct blk_desc *desc, u32 *sizep)
++{
++	struct dm250_table t[2];
++	int ok[2], order[2], tried = 0, i, j, ret = -ENOENT;
++	u32 slot;
++
++	for (i = 0; i < 2; i++) {
++		ok[i] = !dm250_read_table(desc, i, &t[i]);
++		if (ok[i])
++			printf("DM250: table %d: #%u, slot %c (%s)\n", i, t[i].seq,
++			       "0AB"[t[i].slot], t[i].name);
++	}
++	order[0] = ok[0] && ok[1] ? t[1].seq > t[0].seq : !ok[0];
++	order[1] = !order[0];
++
++	for (j = 0; j < 3; j++) {
++		if (j < 2) {
++			i = order[j];
++			if (!ok[i])
++				continue;
++			slot = t[i].slot;
++		} else {
++			slot = 0;
++		}
++		if (tried & BIT(slot))
++			continue;
++		tried |= BIT(slot);
++		ret = dm250_load_slot(desc, slot, sizep);
++		if (!ret) {
++			printf("DM250: booting slot %c\n", "0AB"[slot]);
++			return slot;
++		}
++		printf("DM250: slot %c does not load (%d)\n", "0AB"[slot], ret);
++	}
++
++	return ret;
++}
++
+ /*
+  * Draw the logo again. The autoboot countdown clears its whole text row
+  * ("\e[2K"), and that row runs through the logo.
+@@ -417,11 +532,8 @@ static int do_dm250_boot(struct cmd_tbl *cmdtp, int flag, int argc,
+ 	} else {
+ 		u32 size;
+ 
+-		ret = dm250_load_kernel(desc, &size);
+-		if (ret)
+-			goto fail;
+-		ret = dm250_load_dtb(desc);
+-		if (ret)
++		ret = dm250_choose(desc, &size);
++		if (ret < 0)
+ 			goto fail;
+ 		printf("DM250: kernel %u bytes, separate resource DTB, no initramfs\n",
+ 		       size);
+-- 
+2.47.3
+

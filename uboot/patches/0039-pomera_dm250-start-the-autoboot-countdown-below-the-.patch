@@ -1,0 +1,107 @@
+From dd63af69ea7f64af4fc2a7d523cdf95f2dfae0d8 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:27:34 +0900
+Subject: [PATCH 39/46] pomera_dm250: start the autoboot countdown below the
+ logo
+
+The countdown line begins with \e[2K, which the video console paints
+across the whole text row, logo included. Move the video console cursor
+below the logo on EVT_MAIN_LOOP so that row never crosses it. Key
+handling and serial output are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ board/kingjim/pomera_dm250/Kconfig        | 11 ++++++++
+ board/kingjim/pomera_dm250/pomera_dm250.c | 32 +++++++++++++++++++++++
+ 2 files changed, 43 insertions(+)
+
+diff --git a/board/kingjim/pomera_dm250/Kconfig b/board/kingjim/pomera_dm250/Kconfig
+index 78d8ef8e4e..f2d038b8cf 100644
+--- a/board/kingjim/pomera_dm250/Kconfig
++++ b/board/kingjim/pomera_dm250/Kconfig
+@@ -9,6 +9,17 @@ config SYS_VENDOR
+ config SYS_CONFIG_NAME
+ 	default "pomera_dm250"
+ 
++config POMERA_DM250_TEXT_BELOW_LOGO
++	bool "Start the autoboot countdown below the logo"
++	depends on VIDEO_LOGO
++	default y
++	help
++	  The autoboot countdown starts its line with ANSI "clear entire
++	  line", which the video console implements by painting the whole
++	  text row. Move the video console cursor below the logo before
++	  main_loop, so that row never crosses the logo. Only the video
++	  console moves; serial output and the key handling are unchanged.
++
+ config POMERA_DM250_REDRAW_LOGO
+ 	bool "Redraw the logo when the sd command starts"
+ 	depends on VIDEO_LOGO
+diff --git a/board/kingjim/pomera_dm250/pomera_dm250.c b/board/kingjim/pomera_dm250/pomera_dm250.c
+index 03536ea37a..ce3f589cde 100644
+--- a/board/kingjim/pomera_dm250/pomera_dm250.c
++++ b/board/kingjim/pomera_dm250/pomera_dm250.c
+@@ -18,6 +18,7 @@
+ #include <backlight.h>
+ #include <dm.h>
+ #include <errno.h>
++#include <event.h>
+ #include <generic-phy.h>
+ #include <hang.h>
+ #include <mapmem.h>
+@@ -25,6 +26,7 @@
+ #include <mmc.h>
+ #include <stdio.h>
+ #include <video.h>
++#include <video_console.h>
+ #include <dm/root.h>
+ #include <linux/delay.h>
+ #include <linux/libfdt.h>
+@@ -32,6 +34,7 @@
+ #include <linux/string.h>
+ #include <asm/io.h>
+ #include <asm/unaligned.h>
++#include <bmp_layout.h>
+ #include <power/pmic.h>
+ #include "dm250.h"
+ 
+@@ -271,6 +274,35 @@ static void dm250_redraw_logo(void)
+ 	video_sync(vid, true);
+ }
+ 
++/*
++ * Put the video console cursor on the first text row below the logo, so
++ * that the countdown's "\e[2K" clears a row the logo is not on.
++ */
++static int dm250_text_below_logo(void)
++{
++	struct vidconsole_priv *priv;
++	struct bmp_image *bmp;
++	struct udevice *con;
++	uint row;
++
++	if (!IS_ENABLED(CONFIG_POMERA_DM250_TEXT_BELOW_LOGO))
++		return 0;
++	if (uclass_first_device_err(UCLASS_VIDEO_CONSOLE, &con))
++		return 0;
++	priv = dev_get_uclass_priv(con);
++	bmp = video_get_u_boot_logo();
++	if (!priv->y_charsize || bmp->header.signature[0] != 'B')
++		return 0;
++	row = DIV_ROUND_UP(CONFIG_VIDEO_LOGO_Y +
++			   get_unaligned_le32(&bmp->header.height),
++			   priv->y_charsize);
++	if (row < priv->rows && priv->ycur / priv->y_charsize < row)
++		vidconsole_position_cursor(con, 0, row);
++
++	return 0;
++}
++EVENT_SPY_SIMPLE(EVT_MAIN_LOOP, dm250_text_below_logo);
++
+ static int do_dm250_boot(struct cmd_tbl *cmdtp, int flag, int argc,
+ 			 char *const argv[])
+ {
+-- 
+2.47.3
+

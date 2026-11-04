@@ -1,0 +1,35 @@
+From ca14d743f93b70f0f5034bf9d0f5938fe4c2c8cd Mon Sep 17 00:00:00 2001
+From: Alex Bee <knaerzche@gmail.com>
+Date: Mon, 10 Feb 2025 14:21:55 +0100
+Subject: [PATCH 06/46] rockchip: rk3128: Use fifo-mode for MMC controllers
+
+MMC controllers in RK3128 do not have the IDMAC feature and instead use PL330
+for DMA which is unsupported by u-boot, thus we can use them in fifo-mode only.
+
+Signed-off-by: Alex Bee <knaerzche@gmail.com>
+---
+ arch/arm/dts/rk3128-u-boot.dtsi | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/arch/arm/dts/rk3128-u-boot.dtsi b/arch/arm/dts/rk3128-u-boot.dtsi
+index 6d1965e6b5..371440005f 100644
+--- a/arch/arm/dts/rk3128-u-boot.dtsi
++++ b/arch/arm/dts/rk3128-u-boot.dtsi
+@@ -14,6 +14,14 @@
+ 	bootph-all;
+ };
+ 
++&emmc {
++	fifo-mode;
++};
++
+ &grf {
+ 	bootph-all;
+ };
++
++&sdmmc {
++	fifo-mode;
++};
+-- 
+2.47.3
+

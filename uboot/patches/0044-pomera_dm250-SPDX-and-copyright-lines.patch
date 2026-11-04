@@ -1,0 +1,171 @@
+From 91a3ddc257c861cc3fd705058fcf4091fdd37cd2 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:28:28 +0900
+Subject: [PATCH 44/46] pomera_dm250: SPDX and copyright lines
+
+Our new files get the copyright line (the C files already had SPDX);
+the config fragments, Kconfig and mklogo.py get both. The DTS is
+GPL-2.0+ like rk3128.dtsi, with the Rockchip 2017 line for the parts
+that come from it. Comments only: the DTB and u-boot.bin do not change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ board/kingjim/pomera_dm250/Kconfig                    | 3 +++
+ board/kingjim/pomera_dm250/Makefile                   | 1 +
+ board/kingjim/pomera_dm250/dm250.h                    | 2 ++
+ board/kingjim/pomera_dm250/dm250_boot.c               | 2 ++
+ board/kingjim/pomera_dm250/dm250_bt.c                 | 2 ++
+ board/kingjim/pomera_dm250/dm250_legacy.c             | 2 ++
+ board/kingjim/pomera_dm250/logotest.config            | 3 +++
+ board/kingjim/pomera_dm250/mklogo.py                  | 3 +++
+ board/kingjim/pomera_dm250/pom.config                 | 3 +++
+ board/kingjim/pomera_dm250/pomera_dm250.c             | 2 ++
+ dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts | 5 +++++
+ include/configs/pomera_dm250.h                        | 3 +++
+ 12 files changed, 31 insertions(+)
+
+diff --git a/board/kingjim/pomera_dm250/Kconfig b/board/kingjim/pomera_dm250/Kconfig
+index f2d038b8cf..85a8994106 100644
+--- a/board/kingjim/pomera_dm250/Kconfig
++++ b/board/kingjim/pomera_dm250/Kconfig
+@@ -1,3 +1,6 @@
++# SPDX-License-Identifier: GPL-2.0+
++# Copyright (C) 2026 yasoteien
++
+ if TARGET_POMERA_DM250
+ 
+ config SYS_BOARD
+diff --git a/board/kingjim/pomera_dm250/Makefile b/board/kingjim/pomera_dm250/Makefile
+index 828cbd756d..bba306f0aa 100644
+--- a/board/kingjim/pomera_dm250/Makefile
++++ b/board/kingjim/pomera_dm250/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0+
++# Copyright (C) 2026 yasoteien
+ 
+ obj-y += pomera_dm250.o dm250_bt.o dm250_boot.o dm250_legacy.o
+diff --git a/board/kingjim/pomera_dm250/dm250.h b/board/kingjim/pomera_dm250/dm250.h
+index bdad3a53f2..1fe94b6fed 100644
+--- a/board/kingjim/pomera_dm250/dm250.h
++++ b/board/kingjim/pomera_dm250/dm250.h
+@@ -1,5 +1,7 @@
+ /* SPDX-License-Identifier: GPL-2.0+ */
+ /*
++ * Copyright (C) 2026 yasoteien
++ *
+  * KING JIM Pomera DM250
+  *
+  * Board code reconstructed from the machine code of the author's U-Boot
+diff --git a/board/kingjim/pomera_dm250/dm250_boot.c b/board/kingjim/pomera_dm250/dm250_boot.c
+index a788e6382f..897f97f879 100644
+--- a/board/kingjim/pomera_dm250/dm250_boot.c
++++ b/board/kingjim/pomera_dm250/dm250_boot.c
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0+
+ /*
++ * Copyright (C) 2026 yasoteien
++ *
+  * KING JIM Pomera DM250: bootz with a resume= argument for hibernation
+  *
+  * Reconstructed from the machine code of the author's U-Boot
+diff --git a/board/kingjim/pomera_dm250/dm250_bt.c b/board/kingjim/pomera_dm250/dm250_bt.c
+index 5b611bd347..5f161b8a95 100644
+--- a/board/kingjim/pomera_dm250/dm250_bt.c
++++ b/board/kingjim/pomera_dm250/dm250_bt.c
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0+
+ /*
++ * Copyright (C) 2026 yasoteien
++ *
+  * KING JIM Pomera DM250: factory Bluetooth address
+  *
+  * Reconstructed from the machine code of the author's U-Boot
+diff --git a/board/kingjim/pomera_dm250/dm250_legacy.c b/board/kingjim/pomera_dm250/dm250_legacy.c
+index ba0fd81e3d..44eaca4047 100644
+--- a/board/kingjim/pomera_dm250/dm250_legacy.c
++++ b/board/kingjim/pomera_dm250/dm250_legacy.c
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0+
+ /*
++ * Copyright (C) 2026 yasoteien
++ *
+  * KING JIM Pomera DM250: check and patch the legacy eMMC U-Boot
+  *
+  * Reconstructed from the machine code of the author's U-Boot
+diff --git a/board/kingjim/pomera_dm250/logotest.config b/board/kingjim/pomera_dm250/logotest.config
+index fd3807b2f8..8b0fd22f24 100644
+--- a/board/kingjim/pomera_dm250/logotest.config
++++ b/board/kingjim/pomera_dm250/logotest.config
+@@ -1,3 +1,6 @@
++# SPDX-License-Identifier: GPL-2.0+
++# Copyright (C) 2026 yasoteien
++
+ CONFIG_VIDEO_LOGO_FILE="board/kingjim/pomera_dm250/logo-chart.bmp"
+ CONFIG_VIDEO_LOGO_X=0
+ CONFIG_VIDEO_LOGO_Y=0
+diff --git a/board/kingjim/pomera_dm250/mklogo.py b/board/kingjim/pomera_dm250/mklogo.py
+index a993888ef6..501706643a 100755
+--- a/board/kingjim/pomera_dm250/mklogo.py
++++ b/board/kingjim/pomera_dm250/mklogo.py
+@@ -1,4 +1,7 @@
+ #!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0+
++# Copyright (C) 2026 yasoteien
++#
+ # Make the U-Boot logo for the Pomera DM250 (8-bit RLE8 BMP), without PIL.
+ #
+ #   mklogo.py png IN.png OUT.bmp       PNG (8-bit RGB/RGBA/grey/palette) -> RLE8 BMP
+diff --git a/board/kingjim/pomera_dm250/pom.config b/board/kingjim/pomera_dm250/pom.config
+index 5eda63c16a..baf97d9b1b 100644
+--- a/board/kingjim/pomera_dm250/pom.config
++++ b/board/kingjim/pomera_dm250/pom.config
+@@ -1,3 +1,6 @@
++# SPDX-License-Identifier: GPL-2.0+
++# Copyright (C) 2026 yasoteien
++
+ CONFIG_VIDEO_LOGO_FILE="board/kingjim/pomera_dm250/logo-pom.bmp"
+ CONFIG_VIDEO_LOGO_X=-4
+ CONFIG_VIDEO_LOGO_Y=4
+diff --git a/board/kingjim/pomera_dm250/pomera_dm250.c b/board/kingjim/pomera_dm250/pomera_dm250.c
+index ce3f589cde..27658a305b 100644
+--- a/board/kingjim/pomera_dm250/pomera_dm250.c
++++ b/board/kingjim/pomera_dm250/pomera_dm250.c
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0+
+ /*
++ * Copyright (C) 2026 yasoteien
++ *
+  * KING JIM Pomera DM250
+  *
+  * Reconstructed from the machine code of the author's U-Boot
+diff --git a/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts b/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
+index 41fb4fbd07..cf46a6eac7 100644
+--- a/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
++++ b/dts/upstream/src/arm/rockchip/rk3128-pomera-dm250.dts
+@@ -1,5 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * Pomera DM250 (RK3128) U-Boot device tree.
++ *
++ * (C) Copyright 2017 Rockchip Electronics Co., Ltd (the parts from rk3128.dtsi)
++ * Copyright (C) 2026 yasoteien (this header and the DTS form of the DTB)
++ *
+  * Decompiled from the DTB in the author's U-Boot (dtc -I dtb -O dts), then:
+  *  - panel data-mapping jeida-24 -> jeida-18 (the panel is 18-bit: the
+  *    vendor 3.10 DT uses lvds-format 2 = 8bit format 3, the author's 6.18
+diff --git a/include/configs/pomera_dm250.h b/include/configs/pomera_dm250.h
+index 8806ad169d..8b30e5ed1a 100644
+--- a/include/configs/pomera_dm250.h
++++ b/include/configs/pomera_dm250.h
+@@ -1,4 +1,7 @@
+ /* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Copyright (C) 2026 yasoteien
++ */
+ 
+ #ifndef __POMERA_DM250_H
+ #define __POMERA_DM250_H
+-- 
+2.47.3
+

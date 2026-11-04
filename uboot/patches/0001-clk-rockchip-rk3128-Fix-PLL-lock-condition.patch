@@ -1,0 +1,29 @@
+From 555006df98ce8ce766b7906eca37f7f96f0b1fb3 Mon Sep 17 00:00:00 2001
+From: Alex Bee <knaerzche@gmail.com>
+Date: Mon, 10 Feb 2025 14:21:55 +0100
+Subject: [PATCH 01/46] clk: rockchip: rk3128: Fix PLL lock condition
+
+A PLL is locked if the respective bit is set, thus we have to wait until
+is set.
+
+Signed-off-by: Alex Bee <knaerzche@gmail.com>
+---
+ drivers/clk/rockchip/clk_rk3128.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/clk/rockchip/clk_rk3128.c b/drivers/clk/rockchip/clk_rk3128.c
+index a07285593b..ab40ff851c 100644
+--- a/drivers/clk/rockchip/clk_rk3128.c
++++ b/drivers/clk/rockchip/clk_rk3128.c
+@@ -69,7 +69,7 @@ static int rkclk_set_pll(struct rk3128_cru *cru, enum rk_clk_id clk_id,
+ 	rk_clrreg(&pll->con1, 1 << PLL_PD_SHIFT);
+ 
+ 	/* waiting for pll lock */
+-	while (readl(&pll->con1) & (1 << PLL_LOCK_STATUS_SHIFT))
++	while (!(readl(&pll->con1) & (1 << PLL_LOCK_STATUS_SHIFT)))
+ 		udelay(1);
+ 
+ 	return 0;
+-- 
+2.47.3
+

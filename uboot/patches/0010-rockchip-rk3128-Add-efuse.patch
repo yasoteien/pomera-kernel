@@ -1,0 +1,49 @@
+From 74be0be686c944f1edb90aaaffd816827eeecff9 Mon Sep 17 00:00:00 2001
+From: Alex Bee <knaerzche@gmail.com>
+Date: Mon, 10 Feb 2025 14:21:55 +0100
+Subject: [PATCH 10/46] rockchip: rk3128: Add efuse
+
+RK3128's efuse is currently only supported by u-boot, so add it to
+rk3128-u-boot.dtsi and imply the options required to get the serial
+and the ethernet mac address(es) in SoC Kconfig defaults.
+
+Signed-off-by: Alex Bee <knaerzche@gmail.com>
+---
+ arch/arm/dts/rk3128-u-boot.dtsi | 5 +++++
+ arch/arm/mach-rockchip/Kconfig  | 4 +++-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/dts/rk3128-u-boot.dtsi b/arch/arm/dts/rk3128-u-boot.dtsi
+index 61f612e63c..6518a6cc51 100644
+--- a/arch/arm/dts/rk3128-u-boot.dtsi
++++ b/arch/arm/dts/rk3128-u-boot.dtsi
+@@ -8,6 +8,11 @@
+ 		reg = <0x0 0x20004000 0x0 0x1000>;
+ 		bootph-all;
+ 	};
++
++	efuse: efuse@20090000 {
++		compatible = "rockchip,rk3128-efuse";
++		reg = <0x20090000 0x4000>;
++	};
+ };
+ 
+ &cru {
+diff --git a/arch/arm/mach-rockchip/Kconfig b/arch/arm/mach-rockchip/Kconfig
+index 04f4a6f939..3665322ca1 100644
+--- a/arch/arm/mach-rockchip/Kconfig
++++ b/arch/arm/mach-rockchip/Kconfig
+@@ -65,7 +65,9 @@ config ROCKCHIP_RK3066
+ config ROCKCHIP_RK3128
+ 	bool "Support Rockchip RK3128"
+ 	select CPU_V7A
+-	imply OF_UPSTREAM
++	imply MISC
++	imply MISC_INIT_R
++	imply ROCKCHIP_EFUSE
+ 	imply ROCKCHIP_COMMON_BOARD
+ 	imply OF_UPSTREAM
+ 	help
+-- 
+2.47.3
+

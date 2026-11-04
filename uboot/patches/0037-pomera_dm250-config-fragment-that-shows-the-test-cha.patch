@@ -1,0 +1,25 @@
+From 73e017739cb9b231c14fc77854fbd6004edf1736 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:27:33 +0900
+Subject: [PATCH 37/46] pomera_dm250: config fragment that shows the test chart
+ full screen
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ board/kingjim/pomera_dm250/logotest.config | 3 +++
+ 1 file changed, 3 insertions(+)
+ create mode 100644 board/kingjim/pomera_dm250/logotest.config
+
+diff --git a/board/kingjim/pomera_dm250/logotest.config b/board/kingjim/pomera_dm250/logotest.config
+new file mode 100644
+index 0000000000..fd3807b2f8
+--- /dev/null
++++ b/board/kingjim/pomera_dm250/logotest.config
+@@ -0,0 +1,3 @@
++CONFIG_VIDEO_LOGO_FILE="board/kingjim/pomera_dm250/logo-chart.bmp"
++CONFIG_VIDEO_LOGO_X=0
++CONFIG_VIDEO_LOGO_Y=0
+-- 
+2.47.3
+
