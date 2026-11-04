@@ -27,9 +27,11 @@ Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-up
 
 ### Fixed
 
-- Bluetooth no longer works after resuming from hibernation.
-- Some clock settings are not restored after resuming from hibernation.
-- USB charging may accept a current above the set limit.
-- After a full charge on a powered hub, the battery is shown as discharging, the charge LEDs alternate red and green, and the capacity does not reach 100%.
-- U-Boot: the boot logo was cut by the countdown line; the countdown is now below the logo.
-- U-Boot device tree: the LVDS data mapping (jeida-24 to jeida-18), the backlight PWM polarity and the panel size (223 × 125 mm to 154 × 86 mm).
+Compared with the kernel and U-Boot of the Debian image for the DM250:
+
+- The Pomera hangs under load on the SD card and Wi-Fi at the same time (power management of the PL330 DMA).
+- On a PD hub it shows "charging" while the battery discharges (USB charger detection and RK818 charge settings).
+- The charge LED does not light.
+- The RTC alarm interrupt does not arrive (wiring of the RK818 interrupt).
+- U-Boot: the boot logo is split by black horizontal bands.
+- U-Boot: the LVDS format (jeida-24 to jeida-18) and the backlight PWM polarity in its device tree.
