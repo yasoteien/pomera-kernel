@@ -111,12 +111,12 @@ say "再起動すると、次の順で進みます。" "After the reboot:"
 say "  1. まず、今のカーネルで起動します。" "  1. The Pomera first starts with the current kernel."
 say "  2. 起動の途中で pomera-kernel に移ります。画面が一度消えて、また出ます。" \
 	"  2. During that start it switches to pomera-kernel; the screen goes dark once and comes back."
-say "  3. 正常に起動すれば、約 2 分後に自動で確定し、以後は新しいカーネルで起動します。" \
-	"  3. If it starts normally, it is confirmed by itself about 2 minutes later and used from then on."
-say "  4. うまく起動しなければ、約 5 分で自動で今のカーネルに戻ります。" \
-	"  4. If it does not start properly, the Pomera goes back to the current kernel by itself within about 5 minutes."
-say "  5. 確定した後で戻すには: sudo pomera-kernel rollback（次の起動から前のカーネル）" \
-	"  5. To go back after it is confirmed: sudo pomera-kernel rollback (the previous kernel from the next boot)"
+say "  3. 正常に起動すれば、約 2 分後に自動で確定し、U-Boot も書き換えます。以後はカーネルと U-Boot の組で起動します。" \
+	"  3. If it starts normally, it is confirmed by itself about 2 minutes later and U-Boot is rewritten too; from then on the Pomera starts with the kernel and U-Boot as a set."
+say "  4. うまく起動しなければ、約 5 分以内に自動で今のカーネルに戻ります（U-Boot は書き換えません）。" \
+	"  4. If it does not start properly, the Pomera goes back to the current kernel by itself within about 5 minutes (U-Boot is not rewritten)."
+say "  5. 確定した後で戻すには: sudo pomera-kernel rollback（次の起動から、1 つ前の組。カーネルと U-Boot が組で戻ります）" \
+	"  5. To go back after it is confirmed: sudo pomera-kernel rollback (the previous set from the next boot; kernel and U-Boot go back together)"
 say "以後の更新は sudo apt update && sudo apt upgrade です（apt-get なら dist-upgrade）。" \
 	"Later updates: sudo apt update && sudo apt upgrade (with apt-get, dist-upgrade)."
 say "再起動してください（sudo reboot）。" "Please reboot (sudo reboot)."

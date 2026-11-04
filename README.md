@@ -12,7 +12,7 @@
 - これを使って、ポメラの本体・SD カード・データに不具合や損失が起きても、私たち（yasoteien）は責任を負いません。
 - キングジム、および DM250 用 Debian イメージの配布元とは関係のない、非公式の物です。両者に問い合わせないでください。
 - 入れる前に、SD カードの写し（イメージ）を取ってください。
-- 戻し方: `sudo pomera-kernel rollback`（1 つ前の組に戻す）。起動しなくなった時は、SD カードを抜けば本体の純正のソフトで起動します。SD カードは、取っておいた写しで戻してください。
+- 戻し方: `sudo pomera-kernel rollback`（1 つ前の組に戻す。U-Boot も一緒に戻ります）。起動しなくなった時は、SD カードを抜けば本体の純正のソフトで起動します。SD カードは、取っておいた写しで戻してください。
 
 ## 入れ方
 
@@ -62,9 +62,14 @@ FDTP を使っている人は、FDTP の `./configure`（`.deb` 版なら `sudo 
 
 1. まず、今のカーネルで起動します。
 2. 起動の途中で pomera-kernel に移ります（kexec）。画面が一度消えて、また出ます。
-3. 正常に起動すれば（systemd が running）、約 2 分後に自動で確定し、SD カードのカーネルの場所に書きます。以後は新しいカーネルで起動します。
-4. うまく起動しなければ、watchdog で約 5 分後に自動で今のカーネルに戻ります。人の手は要りません。
-5. 確定した後で戻すには `sudo pomera-kernel rollback`（次の起動から前のカーネル）。
+3. 正常に起動すれば（systemd が running）、約 2 分後に自動で確定し、カーネル・デバイスツリー・U-Boot を組で SD カードに書きます。以後は新しい組（カーネルと U-Boot）で起動します。
+   - カーネルとデバイスツリーは、SD カードの 2 つの置き場（組 A・組 B）のうち、今使っていない方に書きます。どちらで起動するかは小さな表で U-Boot に伝えるので、書いている途中で電源が落ちても、次の起動は前の組か新しい組のどちらかです。
+   - DM250 用の Debian イメージのカーネル（SD カードの 12MiB・24MiB）は書き換えません。
+   - 初めて U-Boot を書く時は、元の U-Boot の写しと戻し方（`RESTORE.txt`）を、SD カードの最初の区画（FAT）の `pomera-kernel/` に置きます。
+4. うまく起動しなければ、watchdog で約 5 分以内に自動で今のカーネルに戻ります（U-Boot は書き換えません）。人の手は要りません。
+5. 確定した後で戻すには `sudo pomera-kernel rollback`（次の起動から、1 つ前の組。カーネルと U-Boot が組で戻ります）。
+
+U-Boot は試しの起動で試せないため、新しい U-Boot は確定の後の次の起動で初めて動きます。そこで起動しなくなった時は、SD カードを抜けば本体の純正のソフトで起動します。SD カードは、PC で `pomera-kernel/RESTORE.txt` の手順（元の U-Boot を書き戻す）か、取っておいた写しで戻してください。
 
 今のカーネル（DM250 用の Debian イメージに付いてくる物）向けの回避策（Wi-Fi の PIO・watchdog・nftables など）は、FDTP が入れた物です。FDTP を使っていない人は、何も外す必要はありません。
 
@@ -81,8 +86,8 @@ sudo apt update && sudo apt upgrade
 ## 戻し方
 
 ```sh
-sudo pomera-kernel status     # 今の組・1 つ前の組
-sudo pomera-kernel rollback   # 1 つ前の組に戻す（次の起動から。もう一度流すと戻る）
+sudo pomera-kernel status     # U-Boot・今の組・次の起動の組・1 つ前の組
+sudo pomera-kernel rollback   # 1 つ前の組（カーネルと U-Boot）に戻す（次の起動から。もう一度流すと戻る）
 ```
 
 古い版は `apt autoremove` で消えます。今の版と 1 つ前の版は残ります。
@@ -96,6 +101,7 @@ sudo pomera-kernel rollback   # 1 つ前の組に戻す（次の起動から。�
 | `scripts/` | 本家の版を取ってパッチを当てて組む台本 |
 | `deb/` | .deb を組む台本と、試し起動・確定・戻しの道具（`pomera-kernel`）、hibernate の時に無線のモジュールを外して入れ直す台本 |
 | `dts/` | デバイスツリー。DM250 用 Debian イメージの DTS（`rk3128-pomera-dm250-image.dts`）と、それを直す台本（`mk_leds.sh`・`mk_panel.sh`）、SD カードの RSCE を組む台本（`mk_rsce.sh`） |
+| `uboot/` | SD カードの U-Boot のソース（本家 U-Boot v2026.07 に当てるパッチ・組む台本・組んだ物の sha256） |
 | `apt/` | apt の署名の公開鍵 |
 | `pomera-kernel-setup.sh` | FDTP なしで、鍵と apt の置き場を足して入れる台本 |
 | `CHANGELOG.md` | 版ごとの変更 |
@@ -113,6 +119,7 @@ sudo pomera-kernel rollback   # 1 つ前の組に戻す（次の起動から。�
 - カーネルとパッチ: GPL-2.0（本家のファイルを変えた所は本家のヘッダーのまま。私たちの新しいファイルは GPL-2.0-only）。`LICENSE` を見てください。
 - 台本と道具（`scripts/`・`deb/`・`dts/` の台本）: GPL-2.0-or-later。
 - デバイスツリー（`dts/` の DTS）: GPL-2.0-or-later（本家の `rk3128.dtsi` に合わせた）。
+- U-Boot とパッチ（`uboot/`）: GPL-2.0+（本家 U-Boot のまま）。出どころは `uboot/README.md`。
 
 ソースは https://github.com/yasoteien/pomera-kernel 、apt の置き場は https://yasoteien.github.io/pomera-kernel-apt/ です。
 

@@ -43,7 +43,7 @@ as U-Boot v2026.07 plus the patches here.
   new one.
 - `emmc`: loads the built-in firmware's U-Boot from the eMMC, makes it look
   at the eMMC before the SD card, turns the display off and jumps to it. To
-  use it, stop the 1-second countdown with a key and type `emmc`. Removing
+  use it, stop the 3-second countdown with a key and type `emmc`. Removing
   the SD card also starts the built-in firmware.
 - The Bluetooth address of the board is read from the eMMC and put into the
   kernel device tree.

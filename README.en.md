@@ -12,7 +12,7 @@ A Linux kernel for running Debian on the King Jim Pomera DM250 (Japanese model).
 - We (yasoteien) are not responsible for any fault or loss of the Pomera, the SD card or data that comes from using it.
 - It is unofficial and has nothing to do with King Jim or with the distributor of the Debian image for the DM250. Please do not contact them about it.
 - Make a copy (image) of the SD card before installing.
-- To go back: `sudo pomera-kernel rollback` (back to the previous set). If it no longer starts, take out the SD card and the Pomera starts its own software; restore the SD card from the copy you made.
+- To go back: `sudo pomera-kernel rollback` (back to the previous set; U-Boot goes back with it). If it no longer starts, take out the SD card and the Pomera starts its own software; restore the SD card from the copy you made.
 
 ## Install
 
@@ -62,9 +62,14 @@ After the reboot:
 
 1. The Pomera first starts with the current kernel.
 2. During that start it switches to pomera-kernel (kexec); the screen goes dark once and comes back.
-3. If it starts normally (systemd reaches running), it is confirmed by itself about 2 minutes later and written to the kernel area of the SD card; from then on it starts with the new kernel.
-4. If it does not start properly, the watchdog brings back the current kernel about 5 minutes later, with no one at the keys.
-5. To go back after it is confirmed: `sudo pomera-kernel rollback` (the previous kernel from the next boot).
+3. If it starts normally (systemd reaches running), it is confirmed by itself about 2 minutes later: the kernel, its device tree and U-Boot are written to the SD card as a set, and from then on the Pomera starts with the new set (kernel and U-Boot).
+   - The kernel and device tree go to the unused one of two places on the card (slot A or B). A small table tells U-Boot which one to boot, so a power cut while writing leaves either the previous set or the new one.
+   - The kernel of the Debian image for the DM250 (at 12 MiB and 24 MiB on the card) is not changed.
+   - The first time U-Boot is written, a copy of the original U-Boot and how to restore it (`RESTORE.txt`) are put in `pomera-kernel/` on the first (FAT) partition of the card.
+4. If it does not start properly, the watchdog brings back the current kernel within about 5 minutes (U-Boot is not rewritten), with no one at the keys.
+5. To go back after it is confirmed: `sudo pomera-kernel rollback` (the previous set from the next boot; kernel and U-Boot go back together).
+
+U-Boot cannot be tried in the trial boot, so a new U-Boot first runs at the boot after confirmation. If the Pomera then no longer starts, take out the SD card and it starts its own software; repair the card on a PC with `pomera-kernel/RESTORE.txt` (write the original U-Boot back) or from the copy you made.
 
 The workarounds for the current kernel (the one that comes with the Debian image for the DM250), such as the Wi-Fi PIO, the watchdog and nftables, were put in by FDTP. Without FDTP there is nothing to remove.
 
@@ -81,8 +86,8 @@ A new kernel comes as a package with a new name (`pomera-kernel-<version>`). `ap
 ## Roll back
 
 ```sh
-sudo pomera-kernel status     # current and previous pair
-sudo pomera-kernel rollback   # back to the previous pair from the next boot (run again to undo)
+sudo pomera-kernel status     # U-Boot, current set, set of the next boot, previous set
+sudo pomera-kernel rollback   # back to the previous set (kernel and U-Boot) from the next boot (run again to undo)
 ```
 
 `apt autoremove` removes old versions but keeps the current and the previous one.
@@ -96,6 +101,7 @@ sudo pomera-kernel rollback   # back to the previous pair from the next boot (ru
 | `scripts/` | script that fetches the stable release, applies the patches and builds |
 | `deb/` | script that builds the .deb, the tool for trying, confirming and rolling back (`pomera-kernel`), and the script that unloads and reloads the wireless modules around hibernation |
 | `dts/` | device tree: the DTS of the Debian image for the DM250 (`rk3128-pomera-dm250-image.dts`), the scripts that fix it (`mk_leds.sh`, `mk_panel.sh`) and the script that builds the RSCE for the SD card (`mk_rsce.sh`) |
+| `uboot/` | source of the U-Boot on the SD card (patches for mainline U-Boot v2026.07, build script, sha256 of the result) |
 | `apt/` | public key of the apt signature |
 | `pomera-kernel-setup.sh` | script that adds the key and the apt source and installs, without FDTP |
 | `CHANGELOG.en.md` | changes by release |
@@ -113,5 +119,6 @@ sudo pomera-kernel rollback   # back to the previous pair from the next boot (ru
 - Kernel and patches: GPL-2.0 (changes to mainline files keep the mainline headers; our new files are GPL-2.0-only). See `LICENSE`.
 - Scripts and tools (`scripts/`, `deb/`, the scripts in `dts/`): GPL-2.0-or-later.
 - Device tree (the DTS in `dts/`): GPL-2.0-or-later (as mainline `rk3128.dtsi`).
+- U-Boot and its patches (`uboot/`): GPL-2.0+ (as mainline U-Boot); origins in `uboot/README.md`.
 
 Source: https://github.com/yasoteien/pomera-kernel ; apt repository: https://yasoteien.github.io/pomera-kernel-apt/.
