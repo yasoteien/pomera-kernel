@@ -2,7 +2,7 @@
 
 この記録は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) の形で書きます。版はメタパッケージ `pomera-kernel` の版（公開の日付 `YYYY.MM.DD`、同じ週の出し直しは `.1`）です。
 
-**試験版です。無保証で、使うのは自己責任です。** キングジム、および ichinomoto 氏が ekesete.net（https://www.ekesete.net/log/?p=9565）で公開している DM250 用 Debian 13 イメージ（以下「イメージ」）とは関係のない、非公式の物です。入れる前に SD カードの写しを取ってください（README の「免責」）。
+**試験版です。無保証で、使うのは自己責任です。** キングジム、および ichinomoto 氏が ekesete.net（https://www.ekesete.net/log/?p=9565）で公開されている DM250 用 Debian 13 イメージ（以下「イメージ」）とは関係のない、非公式の物です。入れる前に SD カードの写しを取ってください（README の「免責」）。
 
 ## [2026.11.04.3] - 2026-11-04
 
