@@ -6,6 +6,8 @@
 
 最初の公開です（下書き）。
 
+上げ方: `sudo apt update && sudo apt upgrade`（`apt-get` なら `dist-upgrade` か `full-upgrade`。`apt-get upgrade` では新しい版のカーネルが入らない）。
+
 ### 追加
 
 - 本家 Linux 6.18.60（longterm）に、DM250 用のパッチ 0001〜0023 を当てたカーネル（`pomera-kernel-6.18.60-5jl`）。

@@ -36,6 +36,16 @@
 
 入れた後の次の起動で、新しいカーネルを 1 回だけ試します（kexec）。起動が正常（systemd が running）なら、その場で SD カードのカーネルの場所に書いて確定します。起きなければ、watchdog で今までのカーネルに戻ります（約 5 分）。人の手は要りません。
 
+## 上げ方
+
+毎週の新しい版は、次で入ります。
+
+```sh
+sudo apt update && sudo apt upgrade
+```
+
+新しい版のカーネルは、別の名前のパッケージ（`pomera-kernel-<版>`）として入ります。`apt-get upgrade` は新しいパッケージを入れないので、メタパッケージ `pomera-kernel` が「保留」のまま上がりません。`apt-get` を使う時は `sudo apt-get dist-upgrade`（または `full-upgrade`）にしてください。上げた後の次の起動で、入れた時と同じく 1 回だけ試してから確定します。
+
 ## 戻し方
 
 ```sh

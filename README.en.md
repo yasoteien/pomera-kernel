@@ -36,6 +36,16 @@ A Linux kernel for running Debian on the King Jim Pomera DM250 (Japanese model).
 
 On the next boot the new kernel is tried once (kexec). If the boot is healthy (systemd reaches running), it is written to the kernel area of the SD card at once. If it does not come up, the watchdog brings back the previous kernel in about five minutes, with no one at the keys.
 
+## Upgrade
+
+Each weekly release comes with:
+
+```sh
+sudo apt update && sudo apt upgrade
+```
+
+A new kernel comes as a package with a new name (`pomera-kernel-<version>`). `apt-get upgrade` does not install new packages, so the meta package `pomera-kernel` stays "kept back". With `apt-get`, use `sudo apt-get dist-upgrade` (or `full-upgrade`). The next boot after the upgrade tries the new kernel once before confirming it, as on installation.
+
 ## Roll back
 
 ```sh

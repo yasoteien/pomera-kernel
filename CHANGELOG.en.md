@@ -6,6 +6,8 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Vers
 
 First release (draft).
 
+Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-upgrade` or `full-upgrade`; `apt-get upgrade` does not install the new kernel).
+
 ### Added
 
 - Kernel built from mainline Linux 6.18.60 (longterm) with the DM250 patches 0001 to 0023 (`pomera-kernel-6.18.60-5jl`).
