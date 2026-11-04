@@ -6,7 +6,7 @@
 
 ## [2026.11.04.3] - 2026-11-04
 
-最初の公開です（下書き）。
+最初の公開です。
 
 上げ方: `sudo apt update && sudo apt upgrade`（`apt-get` なら `dist-upgrade` か `full-upgrade`。`apt-get upgrade` では新しい版のカーネルが入らない）。
 
