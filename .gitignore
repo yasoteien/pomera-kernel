@@ -1,0 +1,3 @@
+# 組み立ての物（scripts/stable.sh・deb/build-deb.sh が作る）
+/deb/out/
+/deb/work/

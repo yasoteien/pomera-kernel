@@ -1,0 +1,628 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] power: supply: rk818: Raise the input limit on a powered hub, LED triggers
+
+Raise the USB input limit step by step when a powered hub is seen on
+the port, and add triggers for the charge LEDs.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -7,14 +7,17 @@
+  * vendor kernel of that device, so that both kernels can be booted on
+  * one machine without upsetting each other's state of charge.
+  *
+- * Stage 5e: as 5d, plus the shutdown on a low battery and the low battery
+- * interrupt as a wakeup source.
++ * Stage 5f: as 5e, plus raising the USB input limit step by step on a
++ * powered hub, and the triggers for the charge LEDs.
+  */
+ 
+ #include <linux/bitfield.h>
++#include <linux/delay.h>
+ #include <linux/devm-helpers.h>
+ #include <linux/extcon.h>
+ #include <linux/interrupt.h>
++#include <linux/jiffies.h>
++#include <linux/leds.h>
+ #include <linux/mfd/rk808.h>
+ #include <linux/minmax.h>
+ #include <linux/module.h>
+@@ -25,6 +28,7 @@
+ #include <linux/power_supply.h>
+ #include <linux/reboot.h>
+ #include <linux/regmap.h>
++#include <linux/usb.h>
+ #include <linux/workqueue.h>
+ 
+ #define RK818_PLUG_IN_STS		BIT(6)	/* RK808_VB_MON_REG */
+@@ -93,6 +97,25 @@
+ #define RK818_LOW_VOLT_MARGIN_UV	50000
+ #define RK818_SHUTDOWN_MS		10000
+ 
++/* Raising the USB input limit on a powered hub, one step per try */
++#define RK818_RAMP_TICK_MS		1000
++#define RK818_RAMP_SETTLE_MS		2000
++#define RK818_RAMP_SAMPLES		5
++#define RK818_RAMP_SAMPLE_MS		200
++/* Samples spread wider than this: the load moved, no decision */
++#define RK818_RAMP_SPREAD_UA		150000
++/* Undone this many times in a row: stay for a while, then try once more */
++#define RK818_RAMP_FAILS		3
++#define RK818_RAMP_HOLD_MS		(5 * 60 * 1000)
++/* A plug-out this soon after a raise caps the ramp for a while */
++#define RK818_RAMP_DROP_MS		10000
++#define RK818_RAMP_CAP_MS		60000
++/* The battery takes no more current near CV or near the charge current */
++#define RK818_RAMP_CV_MARGIN_UV		100000
++#define RK818_RAMP_CC_MARGIN_UA		200000
++
++#define RK818_LED_MS			500
++
+ /*
+  * Testing only: power off at this voltage instead of the battery minimum.
+  * The fuel gauge is then left as it is, so a test does not leave the
+@@ -189,6 +212,64 @@
+ 	1750000, 2000000, 2250000, 2500000, 2750000, 3000000,
+ };
+ 
++/*
++ * The steps of the ramp as USB_ILIM_SEL values. 1 is skipped: 800 mA in
++ * the vendor kernel's table, 80 mA in the datasheet.
++ */
++static const u8 rk818_ramp_sel[] = { 0, 2, 4, 5, 6, 7, 8, 9, 10, 11 };
++
++static int rk818_ramp_ua(int step)
++{
++	return rk818_ilim_ua[rk818_ramp_sel[step]];
++}
++
++/*
++ * The highest input limit reached step by step on a source the USB PHY
++ * does not recognise while a hub is seen on the port. 0 keeps such a
++ * source at 450 mA, as the vendor kernel does.
++ */
++static int unknown_max_ua = 2000000;
++
++static int rk818_set_max_ua(const char *val, const struct kernel_param *kp)
++{
++	int ua, i, ret;
++
++	ret = kstrtoint(val, 0, &ua);
++	if (ret)
++		return ret;
++
++	if (ua) {
++		for (i = 0; i < ARRAY_SIZE(rk818_ramp_sel); i++)
++			if (rk818_ramp_ua(i) == ua)
++				break;
++		if (i == ARRAY_SIZE(rk818_ramp_sel))
++			return -EINVAL;
++	}
++
++	WRITE_ONCE(*(int *)kp->arg, ua);
++	return 0;
++}
++
++static const struct kernel_param_ops rk818_max_ua_ops = {
++	.set = rk818_set_max_ua,
++	.get = param_get_int,
++};
++module_param_cb(unknown_max_ua, &rk818_max_ua_ops, &unknown_max_ua, 0644);
++MODULE_PARM_DESC(unknown_max_ua, "Highest USB input limit on a powered hub (uA, 0: stay at 450 mA)");
++
++enum rk818_ramp_phase {
++	RK818_RAMP_IDLE,
++	RK818_RAMP_SETTLE,
++	RK818_RAMP_CONFIRM,
++};
++
++enum rk818_led_state {
++	RK818_LED_OFF,
++	RK818_LED_GREEN,
++	RK818_LED_RED,
++	RK818_LED_BLINK,
++};
++
+ struct rk818_charger {
+ 	struct device *dev;
+ 	struct regmap *regmap;
+@@ -227,6 +308,31 @@
+ 	int shutdown_uv;
+ 	/* Set once the low battery shutdown has started */
+ 	bool dead;
++
++	/* The USB input limit and its ramp, under ilim_lock */
++	struct mutex ilim_lock;
++	struct delayed_work ramp_work;
++	int irq_out;
++	bool ramp_active;
++	unsigned int ramp_gen;
++	enum rk818_ramp_phase ramp_phase;
++	int ramp_ok;		/* the last confirmed step */
++	int ramp_try;		/* the step being tried, or -1 */
++	int ramp_base_ua;	/* battery current before the try */
++	unsigned long ramp_since;	/* when the last try began */
++	int ramp_raised;	/* the step of that try, or 0 */
++	int ramp_fails;
++	bool ramp_hold;
++	unsigned long ramp_hold_until;
++	int ramp_cap;		/* highest step after a drop, or -1 */
++	unsigned long ramp_cap_until;
++
++	/* Charge LEDs, used by led_work only */
++	struct delayed_work led_work;
++	struct led_trigger *led_red;
++	struct led_trigger *led_green;
++	int led_state;
++	bool led_blink_on;
+ };
+ 
+ static int rk818_plugged(struct rk818_charger *ch, bool *plugged)
+@@ -262,6 +368,31 @@
+ 	return POWER_SUPPLY_USB_TYPE_SDP;
+ }
+ 
++#if IS_REACHABLE(CONFIG_USB)
++static int rk818_hub_found(struct usb_device *udev, void *data)
++{
++	struct device *hc = udev->bus->controller;
++
++	/* A device on a root port of the dwc2 controller */
++	return udev->parent && !udev->parent->parent && hc &&
++	       of_device_is_compatible(hc->of_node, "snps,dwc2");
++}
++#endif
++
++/*
++ * The DM250 never drives VBUS. With a device on its port, VBUS therefore
++ * comes from that device: a hub with its own power supply. A PC is never
++ * seen as a device.
++ */
++static bool rk818_hub_seen(void)
++{
++#if IS_REACHABLE(CONFIG_USB)
++	return usb_for_each_dev(NULL, rk818_hub_found) > 0;
++#else
++	return false;
++#endif
++}
++
+ static int rk818_raw_to_uv(struct rk818_charger *ch, unsigned int raw)
+ {
+ 	return ((int)raw * ch->volt_k / 1000 + ch->volt_b) * 1000;
+@@ -801,13 +932,18 @@
+ 	return -EINVAL;
+ }
+ 
+-/* DCP: the DT limit, CDP: at most 1.5 A, anything else: 450 mA */
++/*
++ * DCP: the DT limit, CDP: at most 1.5 A, a powered hub: the step of the
++ * ramp, anything else: 450 mA. Called under ilim_lock.
++ */
+ static int rk818_update_input(struct rk818_charger *ch)
+ {
+ 	int ua = rk818_ilim_ua[0];
+ 	bool plugged = false;
+ 	int sel, ret, err;
+ 
++	lockdep_assert_held(&ch->ilim_lock);
++
+ 	err = rk818_plugged(ch, &plugged);
+ 	if (!err && plugged) {
+ 		switch (rk818_source_type(ch)) {
+@@ -818,6 +954,9 @@
+ 			ua = min(ch->input_ua, 1500000);
+ 			break;
+ 		default:
++			if (ch->ramp_active)
++				ua = rk818_ramp_ua(ch->ramp_try >= 0 ?
++						   ch->ramp_try : ch->ramp_ok);
+ 			break;
+ 		}
+ 	}
+@@ -830,13 +969,268 @@
+ 	return ret ?: err;
+ }
+ 
++/* Back to 450 mA; also forgets the steps tried so far */
++static void rk818_ramp_reset(struct rk818_charger *ch)
++{
++	ch->ramp_gen++;
++	ch->ramp_phase = RK818_RAMP_IDLE;
++	ch->ramp_ok = 0;
++	ch->ramp_try = -1;
++	ch->ramp_raised = 0;
++	ch->ramp_fails = 0;
++	ch->ramp_hold = false;
++}
++
++static int rk818_ramp_top(struct rk818_charger *ch)
++{
++	int max = READ_ONCE(unknown_max_ua);
++	int top = 0, i;
++
++	for (i = 0; i < ARRAY_SIZE(rk818_ramp_sel); i++)
++		if (rk818_ramp_ua(i) <= max)
++			top = i;
++	if (ch->ramp_cap >= 0 && time_before(jiffies, ch->ramp_cap_until))
++		top = min(top, ch->ramp_cap);
++	return top;
++}
++
++/* Back to the confirmed step; never below it */
++static void rk818_ramp_undo(struct rk818_charger *ch, bool failed)
++{
++	int ua = rk818_ramp_ua(ch->ramp_try);
++
++	ch->ramp_try = -1;
++	ch->ramp_phase = RK818_RAMP_IDLE;
++	if (!failed || ++ch->ramp_fails < RK818_RAMP_FAILS)
++		return;
++
++	/* After the hold one failure is enough to hold again */
++	ch->ramp_fails = RK818_RAMP_FAILS - 1;
++	ch->ramp_hold = true;
++	ch->ramp_hold_until = jiffies + msecs_to_jiffies(RK818_RAMP_HOLD_MS);
++	dev_info(ch->dev, "USB input limit held at %d mA: no current gain at %d mA\n",
++		 rk818_ramp_ua(ch->ramp_ok) / 1000, ua / 1000);
++}
++
++/* Median of a few battery current readings, and their spread */
++static int rk818_sample_current(struct rk818_charger *ch, int *median,
++				int *spread)
++{
++	int val[RK818_RAMP_SAMPLES];
++	int i, j, ret;
++
++	for (i = 0; i < ARRAY_SIZE(val); i++) {
++		if (i)
++			msleep(RK818_RAMP_SAMPLE_MS);
++		ret = rk818_read_current(ch, &val[i]);
++		if (ret)
++			return ret;
++	}
++
++	for (i = 1; i < ARRAY_SIZE(val); i++)
++		for (j = i; j > 0 && val[j - 1] > val[j]; j--)
++			swap(val[j - 1], val[j]);
++
++	*median = val[ARRAY_SIZE(val) / 2];
++	*spread = val[ARRAY_SIZE(val) - 1] - val[0];
++	return 0;
++}
++
++/* Whether the battery would take more current than it gets now */
++static int rk818_ramp_demand(struct rk818_charger *ch, int ua, bool *demand)
++{
++	unsigned int sup;
++	int uv, ret;
++
++	ret = regmap_read(ch->regmap, RK818_SUP_STS_REG, &sup);
++	if (ret)
++		return ret;
++	ret = rk818_read_voltage(ch, &uv);
++	if (ret)
++		return ret;
++
++	*demand = ua < 0 ||
++		  (FIELD_GET(RK818_SUP_STS_CHG_STS, sup) != RK818_CHG_TERM &&
++		   uv < ch->cv_uv - RK818_RAMP_CV_MARGIN_UV &&
++		   ua < ch->cc_ua - RK818_RAMP_CC_MARGIN_UA);
++	return 0;
++}
++
++/*
++ * The USB PHY cannot tell what a powered hub is fed from, so the input
++ * limit is raised one step at a time while the battery current follows
++ * it. A step is kept only when the battery current has grown by half of
++ * the step twice in a row. Anything else, a load that moves under the
++ * readings included, takes the step back to the last confirmed one.
++ */
++static void rk818_ramp_work(struct work_struct *work)
++{
++	struct rk818_charger *ch = container_of(to_delayed_work(work),
++						struct rk818_charger, ramp_work);
++	enum rk818_ramp_phase want;
++	bool plugged = false, active, demand = false;
++	int cur = 0, spread = 0, delta, top, ret;
++	unsigned int gen;
++
++	ret = rk818_plugged(ch, &plugged);
++	if (!ret && !plugged) {
++		mutex_lock(&ch->ilim_lock);
++		ch->ramp_active = false;
++		rk818_ramp_reset(ch);
++		mutex_unlock(&ch->ilim_lock);
++		/* The plug-in interrupt starts it again */
++		return;
++	}
++
++	active = !ret && READ_ONCE(unknown_max_ua) > 0 &&
++		 rk818_source_type(ch) == POWER_SUPPLY_USB_TYPE_UNKNOWN &&
++		 rk818_hub_seen();
++
++	mutex_lock(&ch->ilim_lock);
++	if (active != ch->ramp_active) {
++		ch->ramp_active = active;
++		rk818_ramp_reset(ch);
++		if (active)
++			dev_info(ch->dev, "powered hub: raising the USB input limit step by step\n");
++		ret = rk818_update_input(ch);
++		goto unlock;
++	}
++	if (!active)
++		goto unlock;
++
++	top = rk818_ramp_top(ch);
++	if (ch->ramp_ok > top || ch->ramp_try > top) {
++		/* The limit was lowered */
++		ch->ramp_ok = min(ch->ramp_ok, top);
++		ch->ramp_try = -1;
++		ch->ramp_phase = RK818_RAMP_IDLE;
++		ret = rk818_update_input(ch);
++		goto unlock;
++	}
++
++	want = ch->ramp_phase;
++	switch (ch->ramp_phase) {
++	case RK818_RAMP_IDLE:
++		if (ch->ramp_ok >= top)
++			goto unlock;
++		if (ch->ramp_hold) {
++			if (time_before(jiffies, ch->ramp_hold_until))
++				goto unlock;
++			ch->ramp_hold = false;
++		}
++		break;
++	case RK818_RAMP_SETTLE:
++		if (time_before(jiffies, ch->ramp_since +
++				msecs_to_jiffies(RK818_RAMP_SETTLE_MS)))
++			goto unlock;
++		break;
++	case RK818_RAMP_CONFIRM:
++		break;
++	}
++	gen = ch->ramp_gen;
++	mutex_unlock(&ch->ilim_lock);
++
++	ret = rk818_sample_current(ch, &cur, &spread);
++	if (!ret && want == RK818_RAMP_IDLE)
++		ret = rk818_ramp_demand(ch, cur, &demand);
++
++	mutex_lock(&ch->ilim_lock);
++	if (gen != ch->ramp_gen || !ch->ramp_active || want != ch->ramp_phase)
++		goto unlock;
++
++	if (want == RK818_RAMP_IDLE) {
++		if (ret || spread > RK818_RAMP_SPREAD_UA || !demand)
++			goto unlock;
++		ch->ramp_base_ua = cur;
++		ch->ramp_try = ch->ramp_ok + 1;
++		ch->ramp_phase = RK818_RAMP_SETTLE;
++		ch->ramp_since = jiffies;
++		ch->ramp_raised = ch->ramp_try;
++		ret = rk818_update_input(ch);
++		goto unlock;
++	}
++
++	delta = rk818_ramp_ua(ch->ramp_try) - rk818_ramp_ua(ch->ramp_ok);
++	if (ret || spread > RK818_RAMP_SPREAD_UA) {
++		/* No decision: the readings failed or the load moved */
++		rk818_ramp_undo(ch, false);
++	} else if (cur - ch->ramp_base_ua < delta / 2) {
++		rk818_ramp_undo(ch, true);
++	} else if (want == RK818_RAMP_SETTLE) {
++		ch->ramp_phase = RK818_RAMP_CONFIRM;
++	} else {
++		ch->ramp_ok = ch->ramp_try;
++		ch->ramp_try = -1;
++		ch->ramp_phase = RK818_RAMP_IDLE;
++		ch->ramp_fails = 0;
++		dev_info(ch->dev, "USB input limit %d mA on the powered hub\n",
++			 rk818_ramp_ua(ch->ramp_ok) / 1000);
++	}
++	ret = rk818_update_input(ch);
++
++unlock:
++	mutex_unlock(&ch->ilim_lock);
++	if (ret)
++		dev_err_ratelimited(ch->dev, "USB input limit ramp failed: %d\n", ret);
++	queue_delayed_work(system_freezable_wq, &ch->ramp_work,
++			   msecs_to_jiffies(RK818_RAMP_TICK_MS));
++}
++
++/*
++ * The charge LEDs, as the pdcharge service of FDTP drives them: off when
++ * nothing is plugged in, green when full, red while the battery current
++ * is positive, red blinking when plugged in but discharging.
++ */
++static void rk818_led_work(struct work_struct *work)
++{
++	struct rk818_charger *ch = container_of(to_delayed_work(work),
++						struct rk818_charger, led_work);
++	enum rk818_led_state state;
++	int status, cap, ua;
++	bool plugged;
++
++	if (rk818_plugged(ch, &plugged))
++		goto again;
++
++	if (!plugged)
++		state = RK818_LED_OFF;
++	else if ((!rk818_bat_status(ch, &status) &&
++		  status == POWER_SUPPLY_STATUS_FULL) ||
++		 (!rk818_capacity(ch, &cap) && cap == 100))
++		state = RK818_LED_GREEN;
++	else if (!rk818_read_current(ch, &ua) && ua > 0)
++		state = RK818_LED_RED;
++	else
++		state = RK818_LED_BLINK;
++
++	if (state == RK818_LED_BLINK)
++		ch->led_blink_on = state != ch->led_state || !ch->led_blink_on;
++	if (state != ch->led_state || state == RK818_LED_BLINK) {
++		led_trigger_event(ch->led_red,
++				  state == RK818_LED_RED ||
++				  (state == RK818_LED_BLINK && ch->led_blink_on) ?
++				  LED_FULL : LED_OFF);
++		led_trigger_event(ch->led_green,
++				  state == RK818_LED_GREEN ? LED_FULL : LED_OFF);
++		ch->led_state = state;
++	}
++	/* The plug-in interrupt starts it again */
++	if (state == RK818_LED_OFF)
++		return;
++again:
++	queue_delayed_work(system_freezable_wq, &ch->led_work,
++			   msecs_to_jiffies(RK818_LED_MS));
++}
++
+ static void rk818_monitor_work(struct work_struct *work)
+ {
+ 	struct rk818_charger *ch = container_of(to_delayed_work(work),
+ 						struct rk818_charger, work);
+ 	int ret;
+ 
++	mutex_lock(&ch->ilim_lock);
+ 	ret = rk818_update_input(ch);
++	mutex_unlock(&ch->ilim_lock);
+ 	if (ret)
+ 		dev_err_ratelimited(ch->dev, "input current update failed: %d\n", ret);
+ 
+@@ -875,6 +1269,10 @@
+ 	power_supply_changed(ch->ac);
+ 	power_supply_changed(ch->usb);
+ 
++	/* In case a plug event was missed; no-ops while they are queued */
++	queue_delayed_work(system_freezable_wq, &ch->ramp_work, 0);
++	queue_delayed_work(system_freezable_wq, &ch->led_work, 0);
++
+ 	queue_delayed_work(system_freezable_wq, &ch->work,
+ 			   msecs_to_jiffies(RK818_MONITOR_MS));
+ }
+@@ -932,11 +1330,26 @@
+ 	struct rk818_charger *ch = data;
+ 	int ret;
+ 
++	mutex_lock(&ch->ilim_lock);
++	/* The hub's supply gave up soon after a raise: stay below that step */
++	if (irq == ch->irq_out && ch->ramp_active && ch->ramp_raised > 0 &&
++	    time_before(jiffies, ch->ramp_since + msecs_to_jiffies(RK818_RAMP_DROP_MS))) {
++		ch->ramp_cap = ch->ramp_raised - 1;
++		ch->ramp_cap_until = jiffies + msecs_to_jiffies(RK818_RAMP_CAP_MS);
++		dev_info(ch->dev, "USB input lost at %d mA: staying at or below %d mA\n",
++			 rk818_ramp_ua(ch->ramp_raised) / 1000,
++			 rk818_ramp_ua(ch->ramp_cap) / 1000);
++	}
++	ch->ramp_active = false;
++	rk818_ramp_reset(ch);
+ 	ret = rk818_update(ch->regmap, RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK, 0);
++	mutex_unlock(&ch->ilim_lock);
+ 	if (ret)
+ 		dev_err_ratelimited(ch->dev, "USB input limit reset failed: %d\n", ret);
+ 
+ 	mod_delayed_work(system_freezable_wq, &ch->work, 0);
++	mod_delayed_work(system_freezable_wq, &ch->ramp_work, 0);
++	mod_delayed_work(system_freezable_wq, &ch->led_work, 0);
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -1013,6 +1426,11 @@
+ 	.get_property = rk818_ext_get_property,
+ };
+ 
++static void rk818_unregister_trigger(void *trig)
++{
++	led_trigger_unregister_simple(trig);
++}
++
+ static void rk818_put_node(void *np)
+ {
+ 	of_node_put(np);
+@@ -1170,8 +1588,14 @@
+ 	ret = devm_mutex_init(dev, &ch->lock);
+ 	if (ret)
+ 		return ret;
++	ret = devm_mutex_init(dev, &ch->ilim_lock);
++	if (ret)
++		return ret;
+ 	ch->saved_mah = -1;
+ 	ch->saved_soc = -1;
++	ch->ramp_try = -1;
++	ch->ramp_cap = -1;
++	ch->led_state = -1;
+ 
+ 	ret = rk818_update(ch->regmap, RK818_TS_CTRL_REG, RK818_TS_CTRL_GG_EN,
+ 			   RK818_TS_CTRL_GG_EN);
+@@ -1225,9 +1649,24 @@
+ 	if (IS_ERR(ch->usb))
+ 		return dev_err_probe(dev, PTR_ERR(ch->usb), "failed to register USB supply\n");
+ 
++	led_trigger_register_simple("rk818-led-red", &ch->led_red);
++	ret = devm_add_action_or_reset(dev, rk818_unregister_trigger, ch->led_red);
++	if (ret)
++		return ret;
++	led_trigger_register_simple("rk818-led-green", &ch->led_green);
++	ret = devm_add_action_or_reset(dev, rk818_unregister_trigger, ch->led_green);
++	if (ret)
++		return ret;
++
+ 	ret = devm_delayed_work_autocancel(dev, &ch->work, rk818_monitor_work);
+ 	if (ret)
+ 		return ret;
++	ret = devm_delayed_work_autocancel(dev, &ch->ramp_work, rk818_ramp_work);
++	if (ret)
++		return ret;
++	ret = devm_delayed_work_autocancel(dev, &ch->led_work, rk818_led_work);
++	if (ret)
++		return ret;
+ 
+ 	if (ch->edev) {
+ 		ch->nb.notifier_call = rk818_cable_changed;
+@@ -1242,6 +1681,7 @@
+ 	irq_out = platform_get_irq(pdev, 1);
+ 	if (irq_out < 0)
+ 		return irq_out;
++	ch->irq_out = irq_out;
+ 	irq_low = platform_get_irq(pdev, 2);
+ 	if (irq_low < 0)
+ 		return irq_low;
+@@ -1283,6 +1723,7 @@
+ static int rk818_charger_suspend(struct device *dev)
+ {
+ 	struct rk818_charger *ch = dev_get_drvdata(dev);
++	int ret;
+ 
+ 	mutex_lock(&ch->lock);
+ 	if (ch->dead) {
+@@ -1293,7 +1734,12 @@
+ 	ch->low_volt = false;
+ 	mutex_unlock(&ch->lock);
+ 
+-	return rk818_update(ch->regmap, RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK, 0);
++	mutex_lock(&ch->ilim_lock);
++	ch->ramp_active = false;
++	rk818_ramp_reset(ch);
++	ret = rk818_update(ch->regmap, RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK, 0);
++	mutex_unlock(&ch->ilim_lock);
++	return ret;
+ }
+ 
+ static int rk818_charger_resume(struct device *dev)
+@@ -1301,11 +1747,15 @@
+ 	struct rk818_charger *ch = dev_get_drvdata(dev);
+ 	int ret;
+ 
++	mutex_lock(&ch->ilim_lock);
+ 	ret = rk818_charger_init(ch);
++	mutex_unlock(&ch->ilim_lock);
+ 	if (ret)
+ 		return ret;
+ 
+ 	mod_delayed_work(system_freezable_wq, &ch->work, 0);
++	mod_delayed_work(system_freezable_wq, &ch->ramp_work, 0);
++	mod_delayed_work(system_freezable_wq, &ch->led_work, 0);
+ 	return 0;
+ }
+ 

@@ -1,0 +1,91 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 yasoteien
+# hibernate の前に Wi-Fi・Bluetooth（AP6212、SDIO の brcmfmac と UART の hci_uart）のモジュールを外し、戻った後に入れ直す。
+# 電源が落ちる hibernate の後、入れたままの brcmfmac は「-110」「failed backplane access over SDIO」で戻らない
+# （docs/KERNEL_RECON.md の未確認の一覧 14。外すのは手順の一部、2026-11-04 ユーザーが決めた）。
+#
+# pomera-kernel-tools の物。作者のイメージの /usr/local/sbin/pomera-hibernate-wireless と同じ手順を、こちらで書き直した。
+# 作者の wifi_power・bluetooth_power と同じ錠（/run/pomera-radio-power.lock）と、同じ状態の置き場
+# （/run/pomera-hibernate-wireless）を使うので、作者の物と同時に動いても食い違わない。
+# systemd の drop-in は作者の物と同じ名前（60-pomera-wireless.conf）で /usr/lib に置くので、
+# 作者のイメージ（/etc に同じ名前がある）では作者の物が使われ、これは使われない。
+#
+#   hibernate-wireless prepare   外す（systemd-hibernate.service の ExecStartPre）
+#   hibernate-wireless restore   入れ直す（ExecStopPost。失敗の時も呼ばれる）
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+STATE=/run/pomera-hibernate-wireless
+OFF=/run/pomera-radio-power
+# 外す順は Bluetooth → brcmfmac の差し込み（wcc・cyw・bca）→ brcmfmac、入れ直す順は逆（Wi-Fi が先）
+OUT="hci_uart brcmfmac_wcc brcmfmac_cyw brcmfmac_bca brcmfmac"
+IN="brcmfmac brcmfmac_wcc brcmfmac_cyw brcmfmac_bca hci_uart"
+
+say() { echo "hibernate-wireless: $*" >&2; }
+loaded() { [ -d "/sys/module/$1" ]; }
+
+is_pomera() {
+	tr '\000' '\n' < /sys/firmware/devicetree/base/compatible 2>/dev/null |
+		grep -Eqx 'kingjim,pomera-dm(200|250|250us)'
+}
+
+prepare() {
+	is_pomera || return 0
+	[ ! -e "$STATE" ] || { say "前の回の状態が残っている（restore を先に）。hibernate しない"; return 1; }
+	# brcmfmac を掴んでいるのが差し込み（wcc・cyw・bca）以外なら、外さずに断る
+	for h in /sys/module/brcmfmac/holders/*; do
+		[ -e "$h" ] || continue
+		case ${h##*/} in brcmfmac_wcc|brcmfmac_cyw|brcmfmac_bca) ;; *) say "brcmfmac を ${h##*/} が使っている。hibernate しない"; return 1 ;; esac
+	done
+	mkdir -m 700 "$STATE"
+	for m in $OUT; do loaded "$m" && : > "$STATE/$m"; done
+	for m in $OUT; do
+		[ -f "$STATE/$m" ] && loaded "$m" || continue
+		say "$m を外す"
+		modprobe -r "$m" || { say "$m を外せない。hibernate しない"; return 1; }
+	done
+	for m in $OUT; do loaded "$m" && { say "$m が残っている。hibernate しない"; return 1; }; done
+	return 0
+}
+
+# 利用者が切っていた無線（作者の wifi_power off・bluetooth_power off の印）は、戻った後も切ったままにする。
+# 戻りの起動の間に GPIO が変わりうるので、切る道をもう一度通す。
+reapply_off() {
+	if [ -f "$OFF/bluetooth-off" ]; then
+		modprobe hci_uart && modprobe -r hci_uart || return 1
+	fi
+	if [ -f "$OFF/wifi-off" ]; then
+		c=/sys/bus/platform/devices/10218000.mmc
+		d=/sys/bus/platform/drivers/dwmmc_rockchip
+		[ -d "$c" ] && [ -d "$d" ] || return 1
+		[ -L "$c/driver" ] || echo 10218000.mmc > "$d/bind" || return 1
+		[ "$(readlink -f "$c/driver")" = "$d" ] || return 1
+		echo 10218000.mmc > "$d/unbind" || return 1
+	fi
+}
+
+restore() {
+	[ -d "$STATE" ] || return 0
+	bad=0
+	for m in $IN; do
+		[ -f "$STATE/$m" ] || continue
+		if loaded "$m" || modprobe "$m"; then
+			rm -f "$STATE/$m"; say "$m を入れ直した"
+		else
+			say "$m を入れ直せない（次の restore でもう一度）"; bad=1
+		fi
+	done
+	[ $bad = 0 ] && ! reapply_off && { say "切っていた無線を切り直せない"; bad=1; }
+	[ $bad = 0 ] && rmdir "$STATE"
+	return $bad
+}
+
+case "${1:-}" in
+prepare|restore)
+	exec 9>/run/pomera-radio-power.lock
+	flock -x 9
+	"$1"
+	;;
+*) say "使い方: $0 {prepare|restore}"; exit 2 ;;
+esac

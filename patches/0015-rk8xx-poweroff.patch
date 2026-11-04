@@ -1,0 +1,87 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] mfd: rk8xx: Register a final power-off handler so that poweroff does not halt
+
+The RK8xx driver writes DEV_OFF in the SYS_OFF_MODE_POWER_OFF_PREPARE
+step (over I2C, which may sleep) and registers no handler for
+SYS_OFF_MODE_POWER_OFF.
+On a board where nothing else can power off (no PSCI SYSTEM_OFF, no
+gpio-poweroff), kernel_can_power_off() is then false, and
+reboot(LINUX_REBOOT_CMD_POWER_OFF) is turned into LINUX_REBOOT_CMD_HALT
+before kernel_power_off() is ever called:
+
+  - "systemctl poweroff" halts the CPUs and leaves the PMIC on. The board
+    stays on, draining the battery, until a watchdog resets it or the
+    power button is held.
+  - When kernel_power_off() is called directly (hw_protection's forced
+    shutdown, orderly_poweroff(true)), DEV_OFF is written in the prepare
+    step, but machine_power_off() then finds no handler and returns at
+    once. hw_failure_emergency_action_func() goes on to
+    emergency_restart(), which can win against the PMIC's power-down
+    sequence, so the board restarts instead of switching off.
+
+Seen on a Pomera DM250 (RK3128 + RK818): every "systemctl poweroff" on
+battery ended in a halt and a watchdog reset 57 s later; markers in the
+GRF showed kernel_shutdown_prepare(SYSTEM_HALT), and DEV_OFF was never
+written.
+
+Register a handler for the final step as well, at SYS_OFF_PRIO_LOW so
+that any real power-off handler runs first. It only waits up to 5 s for
+the DEV_OFF written in the prepare step to take effect, and then returns,
+leaving the fallback to the caller as before.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+--- a/drivers/mfd/rk8xx-core.c
++++ b/drivers/mfd/rk8xx-core.c
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <linux/bitfield.h>
++#include <linux/delay.h>
+ #include <linux/interrupt.h>
+ #include <linux/mfd/rk808.h>
+ #include <linux/mfd/core.h>
+@@ -654,6 +655,23 @@
+ 	return NOTIFY_DONE;
+ }
+ 
++/*
++ * The supplies are switched off in the prepare step, where the I2C bus may
++ * still sleep. This handler only waits for that to take effect, so that
++ * machine_power_off() does not return while the PMIC is still on.
++ */
++#define RK8XX_POWER_OFF_WAIT_MS		5000
++
++static int rk808_power_off_wait(struct sys_off_data *data)
++{
++	struct rk808 *rk808 = data->cb_data;
++
++	mdelay(RK8XX_POWER_OFF_WAIT_MS);
++	dev_emerg(rk808->dev, "still running %d ms after the power-off request\n",
++		  RK8XX_POWER_OFF_WAIT_MS);
++	return NOTIFY_DONE;
++}
++
+ static int rk808_restart(struct sys_off_data *data)
+ {
+ 	struct rk808 *rk808 = data->cb_data;
+@@ -818,6 +836,19 @@
+ 			return dev_err_probe(dev, ret,
+ 					     "failed to register poweroff handler\n");
+ 
++		/*
++		 * Without a handler for the final power-off step,
++		 * kernel_can_power_off() is false when nothing else (PSCI,
++		 * gpio-poweroff, ...) can power off, and reboot(POWER_OFF)
++		 * is turned into a halt with the PMIC still on.
++		 */
++		ret = devm_register_sys_off_handler(dev,
++				    SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_LOW,
++				    &rk808_power_off_wait, rk808);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to register poweroff wait handler\n");
++
+ 		switch (rk808->variant) {
+ 		case RK809_ID:
+ 		case RK817_ID:

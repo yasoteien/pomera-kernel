@@ -1,0 +1,838 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] power: supply: Add a charger and fuel gauge driver for the RK818 (read only)
+
+Add rk818_charger, the charger and fuel gauge of the Rockchip RK818
+PMIC, written for the Pomera DM250. The register settings, the fuel
+gauge units and the layout of the battery backed data registers follow
+the vendor kernel of that device, so that both kernels can be booted
+on one machine without upsetting each other's state of charge.
+
+This first stage only reads; no register is written.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff -ruN a/drivers/mfd/rk8xx-core.c b/drivers/mfd/rk8xx-core.c
+--- a/drivers/mfd/rk8xx-core.c	2026-11-02 22:57:34.433384292 +0900
++++ b/drivers/mfd/rk8xx-core.c	2026-11-02 23:00:46.057878449 +0900
+@@ -57,6 +57,13 @@
+ 	DEFINE_RES_IRQ(RK817_IRQ_PLUG_OUT),
+ };
+ 
++/* Same order as the DM250 vendor kernel: plug-in, plug-out, low battery */
++static const struct resource rk818_charger_resources[] = {
++	DEFINE_RES_IRQ(RK818_IRQ_PLUG_IN),
++	DEFINE_RES_IRQ(RK818_IRQ_PLUG_OUT),
++	DEFINE_RES_IRQ(RK818_IRQ_VB_LO),
++};
++
+ static const struct mfd_cell rk805s[] = {
+ 	{ .name = "rk808-clkout", },
+ 	{ .name = "rk808-regulator", },
+@@ -137,6 +144,11 @@
+ 		.num_resources = ARRAY_SIZE(rtc_resources),
+ 		.resources = rtc_resources,
+ 	},
++	{
++		.name = "rk818-charger",
++		.num_resources = ARRAY_SIZE(rk818_charger_resources),
++		.resources = &rk818_charger_resources[0],
++	},
+ };
+ 
+ static const struct rk808_reg_data rk805_pre_init_reg[] = {
+diff -ruN a/drivers/mfd/rk8xx-i2c.c b/drivers/mfd/rk8xx-i2c.c
+--- a/drivers/mfd/rk8xx-i2c.c	2026-11-02 22:57:34.433384292 +0900
++++ b/drivers/mfd/rk8xx-i2c.c	2026-11-02 23:00:46.057878449 +0900
+@@ -89,6 +89,15 @@
+ 	return false;
+ }
+ 
++static bool rk818_is_volatile_reg(struct device *dev, unsigned int reg)
++{
++	/* Charger, fuel gauge and data registers are all live */
++	if (reg >= RK818_SUP_STS_REG && reg <= RK818_DATA19_REG)
++		return true;
++
++	return rk808_is_volatile_reg(dev, reg);
++}
++
+ static bool rk817_is_volatile_reg(struct device *dev, unsigned int reg)
+ {
+ 	/*
+@@ -119,9 +128,9 @@
+ static const struct regmap_config rk818_regmap_config = {
+ 	.reg_bits = 8,
+ 	.val_bits = 8,
+-	.max_register = RK818_USB_CTRL_REG,
++	.max_register = RK818_DATA19_REG,
+ 	.cache_type = REGCACHE_MAPLE,
+-	.volatile_reg = rk808_is_volatile_reg,
++	.volatile_reg = rk818_is_volatile_reg,
+ };
+ 
+ static const struct regmap_config rk805_regmap_config = {
+diff -ruN a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+--- a/drivers/power/supply/Kconfig	2026-11-02 22:57:34.433384292 +0900
++++ b/drivers/power/supply/Kconfig	2026-11-02 23:00:46.057878449 +0900
+@@ -823,6 +823,16 @@
+ 	help
+ 	  Say Y to include support for Rockchip RK817 Battery Charger.
+ 
++config CHARGER_RK818
++	tristate "Rockchip RK818 PMIC charger and fuel gauge"
++	depends on MFD_RK8XX
++	depends on EXTCON || !EXTCON
++	help
++	  Say Y to include support for the charger and fuel gauge of the
++	  Rockchip RK818 PMIC, as used by the Pomera DM250. The behaviour
++	  and the use of the RK818 data registers follow the vendor kernel
++	  of that device.
++
+ config CHARGER_SMB347
+ 	tristate "Summit Microelectronics SMB3XX Battery Charger"
+ 	depends on I2C
+diff -ruN a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+--- a/drivers/power/supply/Makefile	2026-11-02 22:57:34.433384292 +0900
++++ b/drivers/power/supply/Makefile	2026-11-02 23:00:46.057878449 +0900
+@@ -104,6 +104,7 @@
+ obj-$(CONFIG_CHARGER_BQ25980)	+= bq25980_charger.o
+ obj-$(CONFIG_CHARGER_BQ256XX)	+= bq256xx_charger.o
+ obj-$(CONFIG_CHARGER_RK817)	+= rk817_charger.o
++obj-$(CONFIG_CHARGER_RK818)	+= rk818_charger.o
+ obj-$(CONFIG_CHARGER_SMB347)	+= smb347-charger.o
+ obj-$(CONFIG_CHARGER_TPS65090)	+= tps65090-charger.o
+ obj-$(CONFIG_CHARGER_TPS65217)	+= tps65217_charger.o
+diff -ruN a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+--- a/drivers/power/supply/rk818_charger.c	1970-01-01 09:00:00.000000000 +0900
++++ b/drivers/power/supply/rk818_charger.c	2026-11-02 23:00:46.057878449 +0900
+@@ -0,0 +1,717 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Charger and fuel gauge driver for the Rockchip RK818 PMIC
++ *
++ * Written for the Pomera DM250. The register settings, the fuel gauge
++ * units and the layout of the battery backed data registers follow the
++ * vendor kernel of that device, so that both kernels can be booted on
++ * one machine without upsetting each other's state of charge.
++ *
++ * Stage 5a: read only. No register is written.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/devm-helpers.h>
++#include <linux/extcon.h>
++#include <linux/mfd/rk808.h>
++#include <linux/minmax.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++/*
++ * Stage 5a must not write to the PMIC. Every regmap write becomes a build
++ * error, so a write cannot slip in unnoticed.
++ */
++#define RK818_READ_ONLY()	BUILD_BUG_ON_MSG(1, "rk818-charger 5a is read only")
++#define regmap_write(...)		RK818_READ_ONLY()
++#define regmap_write_async(...)		RK818_READ_ONLY()
++#define regmap_raw_write(...)		RK818_READ_ONLY()
++#define regmap_bulk_write(...)		RK818_READ_ONLY()
++#define regmap_multi_reg_write(...)	RK818_READ_ONLY()
++#define regmap_update_bits(...)		RK818_READ_ONLY()
++#define regmap_update_bits_base(...)	RK818_READ_ONLY()
++#define regmap_write_bits(...)		RK818_READ_ONLY()
++#define regmap_set_bits(...)		RK818_READ_ONLY()
++#define regmap_clear_bits(...)		RK818_READ_ONLY()
++#define regmap_assign_bits(...)		RK818_READ_ONLY()
++
++#define RK818_PLUG_IN_STS		BIT(6)	/* RK808_VB_MON_REG */
++
++#define RK818_SUP_STS_BAT_EXS		BIT(7)
++#define RK818_SUP_STS_CHG_STS		GENMASK(6, 4)
++
++#define RK818_ILIM_SEL_MASK		GENMASK(3, 0)
++
++#define RK818_BAT_CUR_AVG_REGH		0xbc
++#define RK818_BAT_CUR_AVG_REGL		0xbd
++#define RK818_BAT_VOL_REGH		0xc4
++#define RK818_GASCNT3_REG		0xb8
++#define RK818_VCALIB0_REGH		0xd5
++#define RK818_VCALIB1_REGH		0xd7
++/* Saved full charge capacity in mAh + 1, big endian (DATA7..DATA10) */
++#define RK818_DATA_FCC_REG		0xe6
++
++#define RK818_MONITOR_MS		5000
++#define RK818_GASCNT_PER_MAH		2390
++#define RK818_CUR_UA_PER_LSB		1506
++#define RK818_OCV_TEMP_C		20
++
++enum rk818_chg_sts {
++	RK818_CHG_OFF,
++	RK818_CHG_WAKEUP,
++	RK818_CHG_TRICKLE,
++	RK818_CHG_CC_CV,
++	RK818_CHG_TERM,
++	RK818_CHG_USB_OV,
++	RK818_CHG_BAT_TEMP,
++	RK818_CHG_TIMER,
++};
++
++/* USB_ILIM_SEL, in the order of the vendor kernel's table */
++static const int rk818_ilim_ua[] = {
++	450000, 800000, 850000, 1000000, 1250000, 1500000,
++	1750000, 2000000, 2250000, 2500000, 2750000, 3000000,
++};
++
++struct rk818_charger {
++	struct device *dev;
++	struct regmap *regmap;
++	struct device_node *np;
++	struct power_supply *bat;
++	struct power_supply *ac;
++	struct power_supply *usb;
++	struct extcon_dev *edev;
++	struct delayed_work work;
++	/* Serialises use of the fuel gauge */
++	struct mutex lock;
++
++	const struct power_supply_battery_ocv_table *ocv;
++	int ocv_len;
++	int volt_k;
++	int volt_b;
++	int design_uah;
++	int full_max_uah;
++	int vmin_uv;
++	int vmax_uv;
++	int cc_ua;
++	int cv_uv;
++	int ir_uohm;
++	int input_ua;
++	int hotdie_mc;
++	bool fcc_warned;
++};
++
++static int rk818_plugged(struct rk818_charger *ch, bool *plugged)
++{
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(ch->regmap, RK808_VB_MON_REG, &val);
++	if (ret)
++		return ret;
++
++	*plugged = val & RK818_PLUG_IN_STS;
++	return 0;
++}
++
++static int rk818_source_type(struct rk818_charger *ch)
++{
++	int sdp, cdp, dcp;
++
++	if (!ch->edev)
++		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
++
++	sdp = extcon_get_state(ch->edev, EXTCON_CHG_USB_SDP);
++	cdp = extcon_get_state(ch->edev, EXTCON_CHG_USB_CDP);
++	dcp = extcon_get_state(ch->edev, EXTCON_CHG_USB_DCP);
++	if (sdp < 0 || cdp < 0 || dcp < 0 || sdp + cdp + dcp != 1)
++		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
++
++	if (dcp)
++		return POWER_SUPPLY_USB_TYPE_DCP;
++	if (cdp)
++		return POWER_SUPPLY_USB_TYPE_CDP;
++	return POWER_SUPPLY_USB_TYPE_SDP;
++}
++
++static int rk818_raw_to_uv(struct rk818_charger *ch, unsigned int raw)
++{
++	return ((int)raw * ch->volt_k / 1000 + ch->volt_b) * 1000;
++}
++
++static int rk818_read_voltage(struct rk818_charger *ch, int *uv)
++{
++	__be16 raw;
++	int ret;
++
++	ret = regmap_bulk_read(ch->regmap, RK818_BAT_VOL_REGH, &raw, sizeof(raw));
++	if (ret)
++		return ret;
++
++	*uv = rk818_raw_to_uv(ch, be16_to_cpu(raw));
++	return 0;
++}
++
++/* Positive while charging */
++static int rk818_read_current(struct rk818_charger *ch, int *ua)
++{
++	unsigned int h, l;
++	int val[3], raw, i, ret;
++
++	/* The two halves are not latched; read until two samples agree */
++	for (i = 0; i < ARRAY_SIZE(val); i++) {
++		ret = regmap_read(ch->regmap, RK818_BAT_CUR_AVG_REGL, &l);
++		if (ret)
++			return ret;
++		ret = regmap_read(ch->regmap, RK818_BAT_CUR_AVG_REGH, &h);
++		if (ret)
++			return ret;
++		val[i] = (h << 8) | l;
++	}
++	raw = val[0] == val[1] ? val[1] : val[2];
++
++	*ua = sign_extend32(raw, 11) * RK818_CUR_UA_PER_LSB;
++	return 0;
++}
++
++static int rk818_read_charge_full(struct rk818_charger *ch, int *uah)
++{
++	__be32 raw;
++	u32 val;
++	int ret;
++
++	ret = regmap_bulk_read(ch->regmap, RK818_DATA_FCC_REG, &raw, sizeof(raw));
++	if (ret)
++		return ret;
++
++	val = be32_to_cpu(raw);
++	if (val > 500 && val - 1 <= ch->full_max_uah / 1000) {
++		*uah = (val - 1) * 1000;
++		return 0;
++	}
++
++	if (!ch->fcc_warned) {
++		ch->fcc_warned = true;
++		dev_warn(ch->dev, "invalid saved FCC %u, using design capacity %d uAh\n",
++			 val, ch->design_uah);
++	}
++	*uah = ch->design_uah;
++	return 0;
++}
++
++static int rk818_read_gascnt(struct rk818_charger *ch, int *cnt)
++{
++	__be32 a, b;
++	int ret;
++
++	ret = regmap_bulk_read(ch->regmap, RK818_GASCNT3_REG, &a, sizeof(a));
++	if (ret)
++		return ret;
++	ret = regmap_bulk_read(ch->regmap, RK818_GASCNT3_REG, &b, sizeof(b));
++	if (ret)
++		return ret;
++	if (a != b) {
++		ret = regmap_bulk_read(ch->regmap, RK818_GASCNT3_REG, &a, sizeof(a));
++		if (ret)
++			return ret;
++	}
++
++	*cnt = (s32)be32_to_cpu(a);
++	return 0;
++}
++
++static int rk818_cnt_to_uah(int cnt)
++{
++	return (u32)max(cnt, 0) / RK818_GASCNT_PER_MAH * 1000;
++}
++
++static int rk818_voltage_capacity(struct rk818_charger *ch, int uv)
++{
++	int cap;
++
++	if (ch->ocv)
++		cap = power_supply_ocv2cap_simple(ch->ocv, ch->ocv_len, uv);
++	else
++		cap = DIV_ROUND_CLOSEST((uv - ch->vmin_uv) * 100,
++					ch->vmax_uv - ch->vmin_uv);
++
++	return clamp(cap, 0, 100);
++}
++
++static int rk818_bat_status(struct rk818_charger *ch, int *status)
++{
++	unsigned int sup;
++	bool plugged;
++	int ret;
++
++	ret = rk818_plugged(ch, &plugged);
++	if (ret)
++		return ret;
++	if (!plugged) {
++		*status = POWER_SUPPLY_STATUS_DISCHARGING;
++		return 0;
++	}
++
++	ret = regmap_read(ch->regmap, RK818_SUP_STS_REG, &sup);
++	if (ret)
++		return ret;
++
++	switch (FIELD_GET(RK818_SUP_STS_CHG_STS, sup)) {
++	case RK818_CHG_OFF:
++		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++		break;
++	case RK818_CHG_WAKEUP:
++	case RK818_CHG_TRICKLE:
++	case RK818_CHG_CC_CV:
++		*status = POWER_SUPPLY_STATUS_CHARGING;
++		break;
++	case RK818_CHG_TERM:
++		*status = POWER_SUPPLY_STATUS_FULL;
++		break;
++	default:
++		*status = POWER_SUPPLY_STATUS_UNKNOWN;
++		break;
++	}
++	return 0;
++}
++
++static int rk818_bat_health(struct rk818_charger *ch, int *health)
++{
++	unsigned int sup;
++	int ret;
++
++	ret = regmap_read(ch->regmap, RK818_SUP_STS_REG, &sup);
++	if (ret)
++		return ret;
++
++	if (!(sup & RK818_SUP_STS_BAT_EXS)) {
++		*health = POWER_SUPPLY_HEALTH_NO_BATTERY;
++		return 0;
++	}
++
++	switch (FIELD_GET(RK818_SUP_STS_CHG_STS, sup)) {
++	case RK818_CHG_USB_OV:
++		*health = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
++		break;
++	case RK818_CHG_BAT_TEMP:
++		*health = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++		break;
++	case RK818_CHG_TIMER:
++		*health = POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE;
++		break;
++	default:
++		*health = POWER_SUPPLY_HEALTH_GOOD;
++		break;
++	}
++	return 0;
++}
++
++static int rk818_charge_now(struct rk818_charger *ch, int *uah)
++{
++	int cnt, ret;
++
++	mutex_lock(&ch->lock);
++	ret = rk818_read_gascnt(ch, &cnt);
++	mutex_unlock(&ch->lock);
++	if (ret)
++		return ret;
++
++	*uah = rk818_cnt_to_uah(cnt);
++	return 0;
++}
++
++static int rk818_capacity(struct rk818_charger *ch, int *cap)
++{
++	int now, full, uv, ret;
++
++	ret = rk818_charge_now(ch, &now);
++	if (ret) {
++		/* Fall back to the voltage when the counter cannot be read */
++		ret = rk818_read_voltage(ch, &uv);
++		if (ret)
++			return ret;
++		*cap = rk818_voltage_capacity(ch, uv);
++		return 0;
++	}
++
++	ret = rk818_read_charge_full(ch, &full);
++	if (ret)
++		return ret;
++	if (full <= 0)
++		return -ENODATA;
++
++	*cap = min_t(u64, DIV_ROUND_CLOSEST_ULL((u64)now * 100, full), 100);
++	return 0;
++}
++
++static int rk818_bat_get_property(struct power_supply *psy,
++				  enum power_supply_property psp,
++				  union power_supply_propval *val)
++{
++	struct rk818_charger *ch = power_supply_get_drvdata(psy);
++	unsigned int sup;
++	int ret = 0;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_PRESENT:
++		ret = regmap_read(ch->regmap, RK818_SUP_STS_REG, &sup);
++		if (!ret)
++			val->intval = !!(sup & RK818_SUP_STS_BAT_EXS);
++		break;
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = rk818_bat_status(ch, &val->intval);
++		break;
++	case POWER_SUPPLY_PROP_HEALTH:
++		ret = rk818_bat_health(ch, &val->intval);
++		break;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		ret = rk818_capacity(ch, &val->intval);
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = rk818_read_voltage(ch, &val->intval);
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		ret = rk818_read_current(ch, &val->intval);
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_NOW:
++		ret = rk818_charge_now(ch, &val->intval);
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_FULL:
++		ret = rk818_read_charge_full(ch, &val->intval);
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
++		val->intval = ch->design_uah;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
++		val->intval = ch->vmin_uv;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
++		val->intval = ch->vmax_uv;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++		val->intval = ch->cc_ua;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
++		val->intval = ch->cv_uv;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return ret;
++}
++
++static int rk818_ext_get_property(struct power_supply *psy,
++				  enum power_supply_property psp,
++				  union power_supply_propval *val)
++{
++	struct rk818_charger *ch = power_supply_get_drvdata(psy);
++	unsigned int ctrl;
++	bool plugged;
++	int type, ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		ret = regmap_read(ch->regmap, RK818_USB_CTRL_REG, &ctrl);
++		if (ret)
++			return ret;
++		ctrl &= RK818_ILIM_SEL_MASK;
++		if (ctrl >= ARRAY_SIZE(rk818_ilim_ua))
++			return -EINVAL;
++		val->intval = rk818_ilim_ua[ctrl];
++		return 0;
++	case POWER_SUPPLY_PROP_ONLINE:
++	case POWER_SUPPLY_PROP_USB_TYPE:
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	ret = rk818_plugged(ch, &plugged);
++	if (ret)
++		return ret;
++	if (!plugged) {
++		val->intval = 0;
++		return 0;
++	}
++
++	type = rk818_source_type(ch);
++	if (psp == POWER_SUPPLY_PROP_USB_TYPE)
++		val->intval = type;
++	else if (psy == ch->usb)
++		val->intval = type != POWER_SUPPLY_USB_TYPE_DCP;
++	else
++		val->intval = type == POWER_SUPPLY_USB_TYPE_DCP;
++	return 0;
++}
++
++static void rk818_monitor_work(struct work_struct *work)
++{
++	struct rk818_charger *ch = container_of(to_delayed_work(work),
++						struct rk818_charger, work);
++
++	power_supply_changed(ch->bat);
++	power_supply_changed(ch->ac);
++	power_supply_changed(ch->usb);
++
++	queue_delayed_work(system_freezable_wq, &ch->work,
++			   msecs_to_jiffies(RK818_MONITOR_MS));
++}
++
++static const enum power_supply_property rk818_bat_props[] = {
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_CHARGE_NOW,
++	POWER_SUPPLY_PROP_CHARGE_FULL,
++	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
++	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
++	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
++};
++
++static const enum power_supply_property rk818_ac_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++};
++
++static const enum power_supply_property rk818_usb_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_USB_TYPE,
++};
++
++/* The names are what the vendor kernel and pdcharge use */
++static const struct power_supply_desc rk818_bat_desc = {
++	.name = "BATTERY",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = rk818_bat_props,
++	.num_properties = ARRAY_SIZE(rk818_bat_props),
++	.get_property = rk818_bat_get_property,
++};
++
++static const struct power_supply_desc rk818_ac_desc = {
++	.name = "AC",
++	.type = POWER_SUPPLY_TYPE_MAINS,
++	.properties = rk818_ac_props,
++	.num_properties = ARRAY_SIZE(rk818_ac_props),
++	.get_property = rk818_ext_get_property,
++};
++
++static const struct power_supply_desc rk818_usb_desc = {
++	.name = "USB",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
++		     BIT(POWER_SUPPLY_USB_TYPE_SDP) |
++		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
++		     BIT(POWER_SUPPLY_USB_TYPE_CDP),
++	.properties = rk818_usb_props,
++	.num_properties = ARRAY_SIZE(rk818_usb_props),
++	.get_property = rk818_ext_get_property,
++};
++
++static void rk818_put_node(void *np)
++{
++	of_node_put(np);
++}
++
++static int rk818_read_calibration(struct rk818_charger *ch)
++{
++	__be16 raw0, raw1;
++	int v0, v1, ret;
++
++	ret = regmap_bulk_read(ch->regmap, RK818_VCALIB0_REGH, &raw0, sizeof(raw0));
++	if (ret)
++		return ret;
++	ret = regmap_bulk_read(ch->regmap, RK818_VCALIB1_REGH, &raw1, sizeof(raw1));
++	if (ret)
++		return ret;
++
++	v0 = be16_to_cpu(raw0);
++	v1 = be16_to_cpu(raw1);
++	if (v0 >= v1)
++		return -EINVAL;
++
++	/* VCALIB0 and VCALIB1 are the readings at 3.0 V and 4.2 V */
++	ch->volt_k = 1200000 / (v1 - v0);
++	ch->volt_b = 4200 - ch->volt_k * v1 / 1000;
++	return 0;
++}
++
++static int rk818_read_battery(struct rk818_charger *ch)
++{
++	struct power_supply_battery_info *info;
++	const struct power_supply_battery_ocv_table *table;
++	int len, ret;
++
++	ret = power_supply_get_battery_info(ch->bat, &info);
++	if (ret)
++		return ret;
++
++	if (info->charge_full_design_uah <= 0 ||
++	    info->voltage_min_design_uv <= 0 ||
++	    info->voltage_min_design_uv >= info->voltage_max_design_uv ||
++	    info->constant_charge_current_max_ua <= 0 ||
++	    info->constant_charge_voltage_max_uv <= 0) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	ch->design_uah = info->charge_full_design_uah;
++	ch->vmin_uv = info->voltage_min_design_uv;
++	ch->vmax_uv = info->voltage_max_design_uv;
++	ch->ir_uohm = max(info->factory_internal_resistance_uohm, 0);
++	ch->cc_ua = info->constant_charge_current_max_ua;
++	ch->cv_uv = info->constant_charge_voltage_max_uv;
++
++	table = power_supply_find_ocv2cap_table(info, RK818_OCV_TEMP_C, &len);
++	if (table) {
++		ch->ocv = devm_kmemdup(ch->dev, table, len * sizeof(*table),
++				       GFP_KERNEL);
++		if (!ch->ocv) {
++			ret = -ENOMEM;
++			goto out;
++		}
++		ch->ocv_len = len;
++	}
++
++out:
++	power_supply_put_battery_info(ch->bat, info);
++	return ret;
++}
++
++static int rk818_read_dt(struct rk818_charger *ch)
++{
++	struct device_node *ext;
++	u32 val;
++	int i;
++
++	ch->full_max_uah = ch->design_uah;
++	if (!of_property_read_u32(ch->np, "rockchip,charge-full-max-microamp-hours",
++				  &val)) {
++		if (val < ch->design_uah || val > INT_MAX)
++			return dev_err_probe(ch->dev, -EINVAL,
++					     "invalid maximum full-charge capacity\n");
++		ch->full_max_uah = val;
++	}
++
++	ch->input_ua = rk818_ilim_ua[0];
++	if (!of_property_read_u32(ch->np, "input-current-limit-microamp", &val)) {
++		for (i = 0; i < ARRAY_SIZE(rk818_ilim_ua); i++)
++			if (val == rk818_ilim_ua[i])
++				break;
++		if (i == ARRAY_SIZE(rk818_ilim_ua))
++			goto invalid;
++		ch->input_ua = val;
++	}
++
++	/* Hot die threshold: 85 to 115 degC in steps of 10 */
++	ch->hotdie_mc = 85000;
++	if (!of_property_read_u32(ch->np,
++				  "rockchip,charge-feedback-temperature-millicelsius",
++				  &val)) {
++		if (val < 85000 || val > 115000 || (val - 85000) % 10000)
++			goto invalid;
++		ch->hotdie_mc = val;
++	}
++
++	if (of_property_present(ch->np, "extcon")) {
++		ext = of_parse_phandle(ch->np, "extcon", 0);
++		if (!ext)
++			goto invalid;
++		ch->edev = extcon_find_edev_by_node(ext);
++		of_node_put(ext);
++		if (IS_ERR(ch->edev))
++			return dev_err_probe(ch->dev, PTR_ERR(ch->edev),
++					     "invalid charger limits or extcon\n");
++	}
++
++	return 0;
++
++invalid:
++	return dev_err_probe(ch->dev, -EINVAL, "invalid charger limits or extcon\n");
++}
++
++static int rk818_charger_probe(struct platform_device *pdev)
++{
++	struct rk808 *rk808 = dev_get_drvdata(pdev->dev.parent);
++	struct power_supply_config cfg = {};
++	struct device *dev = &pdev->dev;
++	struct rk818_charger *ch;
++	int ret;
++
++	ch = devm_kzalloc(dev, sizeof(*ch), GFP_KERNEL);
++	if (!ch)
++		return -ENOMEM;
++
++	ch->dev = dev;
++	ch->regmap = rk808->regmap;
++	platform_set_drvdata(pdev, ch);
++
++	ch->np = of_get_child_by_name(dev->parent->of_node, "charger");
++	if (!ch->np)
++		return -ENODEV;
++	ret = devm_add_action_or_reset(dev, rk818_put_node, ch->np);
++	if (ret)
++		return ret;
++
++	ret = devm_mutex_init(dev, &ch->lock);
++	if (ret)
++		return ret;
++
++	ret = rk818_read_calibration(ch);
++	if (ret)
++		return dev_err_probe(dev, ret, "invalid voltage calibration data\n");
++
++	cfg.fwnode = of_fwnode_handle(ch->np);
++	cfg.drv_data = ch;
++
++	ch->bat = devm_power_supply_register(dev, &rk818_bat_desc, &cfg);
++	if (IS_ERR(ch->bat))
++		return dev_err_probe(dev, PTR_ERR(ch->bat), "failed to register battery\n");
++
++	ret = rk818_read_battery(ch);
++	if (ret)
++		return dev_err_probe(dev, ret, "invalid monitored-battery data\n");
++
++	ret = rk818_read_dt(ch);
++	if (ret)
++		return ret;
++
++	ch->ac = devm_power_supply_register(dev, &rk818_ac_desc, &cfg);
++	if (IS_ERR(ch->ac))
++		return dev_err_probe(dev, PTR_ERR(ch->ac), "failed to register AC supply\n");
++
++	ch->usb = devm_power_supply_register(dev, &rk818_usb_desc, &cfg);
++	if (IS_ERR(ch->usb))
++		return dev_err_probe(dev, PTR_ERR(ch->usb), "failed to register USB supply\n");
++
++	ret = devm_delayed_work_autocancel(dev, &ch->work, rk818_monitor_work);
++	if (ret)
++		return ret;
++
++	queue_delayed_work(system_freezable_wq, &ch->work, 0);
++	dev_info(dev, "RK818 battery monitor initialized (read only)\n");
++	return 0;
++}
++
++static struct platform_driver rk818_charger_driver = {
++	.probe = rk818_charger_probe,
++	.driver = {
++		.name = "rk818-charger",
++	},
++};
++module_platform_driver(rk818_charger_driver);
++
++MODULE_DESCRIPTION("Rockchip RK818 charger and fuel gauge driver");
++MODULE_LICENSE("GPL");
++MODULE_ALIAS("platform:rk818-charger");
+diff -ruN a/include/linux/mfd/rk808.h b/include/linux/mfd/rk808.h
+--- a/include/linux/mfd/rk808.h	2026-11-02 22:57:51.137078760 +0900
++++ b/include/linux/mfd/rk808.h	2026-11-02 23:00:46.057878449 +0900
+@@ -332,7 +332,9 @@
+ #define RK818_BOOST_LDO9_SLP_VSEL_REG	0x55
+ #define RK818_BOOST_CTRL_REG		0x56
+ #define RK818_DCDC_ILMAX		0x90
++#define RK818_SUP_STS_REG		0xa0
+ #define RK818_USB_CTRL_REG		0xa1
++#define RK818_DATA19_REG		0xf2
+ 
+ #define RK818_H5V_EN			BIT(0)
+ #define RK818_REF_RDY_CTRL		BIT(1)

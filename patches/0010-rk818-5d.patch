@@ -1,0 +1,366 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] power: supply: rk818: Maintain the fuel gauge
+
+Write the fuel gauge as well: the counter calibration and the data
+saved in the battery backed registers.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff -ruN a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+--- a/drivers/power/supply/rk818_charger.c	2026-11-02 23:02:32.611928381 +0900
++++ b/drivers/power/supply/rk818_charger.c	2026-11-02 23:04:08.398175082 +0900
+@@ -7,8 +7,8 @@
+  * vendor kernel of that device, so that both kernels can be booted on
+  * one machine without upsetting each other's state of charge.
+  *
+- * Stage 5c: the USB input current limit and the charger settings are
+- * written. The fuel gauge is only read.
++ * Stage 5d: the USB input current limit, the charger settings and the
++ * fuel gauge (counter calibration and the saved data) are written.
+  */
+ 
+ #include <linux/bitfield.h>
+@@ -47,19 +47,45 @@
+ /* Digital termination, CC/CV timer on */
+ #define RK818_CHRG_CTRL3_VAL		0x26
+ 
++#define RK818_TS_CTRL_REG		0xac
++#define RK818_TS_CTRL_GG_EN		BIT(7)
++#define RK818_GGCON_REG			0xb0
++/* ADC offset calibration and OCV sampling intervals: 8 min */
++#define RK818_GGCON_INTERV_MASK		GENMASK(5, 2)
++#define RK818_GGSTS_REG			0xb1
++#define RK818_GGSTS_BAT_CON		BIT(4)
++#define RK818_GASCNT_CAL3_REG		0xb4
++#define RK818_BAT_OCV_REGH		0xc2
++#define RK818_NON_ACT_TIMER_REG		0xd4
+ #define RK818_BAT_CUR_AVG_REGH		0xbc
+ #define RK818_BAT_CUR_AVG_REGL		0xbd
+ #define RK818_BAT_VOL_REGH		0xc4
+ #define RK818_GASCNT3_REG		0xb8
+ #define RK818_VCALIB0_REGH		0xd5
+ #define RK818_VCALIB1_REGH		0xd7
+-/* Saved full charge capacity in mAh + 1, big endian (DATA7..DATA10) */
++/*
++ * Battery backed data registers, shared with the vendor kernel:
++ * DATA1 state of charge in %, DATA2..5 remaining mAh (big endian),
++ * DATA7..10 full charge capacity in mAh + 1 (big endian, read only here),
++ * DATA11 the NON_ACT_TIMER value seen at the last boot, DATA15 flags.
++ */
++#define RK818_DATA_SOC_REG		0xe0
++#define RK818_DATA_REMAIN_REG		0xe1
+ #define RK818_DATA_FCC_REG		0xe6
++#define RK818_DATA_TIMER_REG		0xea
++#define RK818_DATA_FLAGS_REG		0xee
++#define RK818_FLAGS_RESEED		BIT(3)
++#define RK818_FLAGS_RESEED_REST		BIT(4)
++#define RK818_FLAGS_VALID		BIT(5)
++/* NON_ACT_TIMER above this counts as a long rest */
++#define RK818_LONG_REST			29
+ 
+ #define RK818_MONITOR_MS		5000
+ #define RK818_GASCNT_PER_MAH		2390
+ #define RK818_CUR_UA_PER_LSB		1506
+ #define RK818_OCV_TEMP_C		20
++/* A negative counter is replaced by a voltage estimate after this */
++#define RK818_NEG_CNT_MS		60000
+ 
+ /*
+  * The registers this stage may write and the bits in them. Every write
+@@ -75,6 +101,19 @@
+ 	{ RK818_CHRG_CTRL_REG1, 0xff },
+ 	{ RK818_CHRG_CTRL_REG2, 0xff },
+ 	{ RK818_CHRG_CTRL_REG3, 0xff },
++	{ RK818_TS_CTRL_REG, RK818_TS_CTRL_GG_EN },
++	{ RK818_GGCON_REG, RK818_GGCON_INTERV_MASK },
++	{ RK818_GGSTS_REG, RK818_GGSTS_BAT_CON },
++	{ RK818_DATA_SOC_REG, 0xff },
++	{ RK818_DATA_TIMER_REG, 0xff },
++	{ RK818_DATA_FLAGS_REG, RK818_FLAGS_RESEED | RK818_FLAGS_RESEED_REST |
++				RK818_FLAGS_VALID },
++};
++
++/* The 32 bit registers this stage may write */
++static const u8 rk818_writable32[] = {
++	RK818_GASCNT_CAL3_REG,
++	RK818_DATA_REMAIN_REG,
+ };
+ 
+ static int rk818_update(struct regmap *map, unsigned int reg,
+@@ -92,7 +131,20 @@
+ 	return -EPERM;
+ }
+ 
+-#define RK818_NO_WRITE()	BUILD_BUG_ON_MSG(1, "rk818-charger: use rk818_update()")
++static int rk818_write32(struct regmap *map, unsigned int reg, u32 val)
++{
++	__be32 raw = cpu_to_be32(val);
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(rk818_writable32); i++)
++		if (reg == rk818_writable32[i])
++			return regmap_bulk_write(map, reg, &raw, sizeof(raw));
++
++	WARN_ONCE(1, "rk818-charger: 32 bit write to %#x is not allowed\n", reg);
++	return -EPERM;
++}
++
++#define RK818_NO_WRITE()	BUILD_BUG_ON_MSG(1, "rk818-charger: use rk818_update()/rk818_write32()")
+ #define regmap_write(...)		RK818_NO_WRITE()
+ #define regmap_write_async(...)		RK818_NO_WRITE()
+ #define regmap_raw_write(...)		RK818_NO_WRITE()
+@@ -149,6 +201,12 @@
+ 	int input_ua;
+ 	int hotdie_mc;
+ 	bool fcc_warned;
++
++	/* Fuel gauge state, under lock */
++	int saved_mah;
++	int saved_soc;
++	bool neg_cnt;
++	unsigned long neg_cnt_since;
+ };
+ 
+ static int rk818_plugged(struct rk818_charger *ch, bool *plugged)
+@@ -288,6 +346,195 @@
+ 	return clamp(cap, 0, 100);
+ }
+ 
++static int rk818_write_gascnt(struct rk818_charger *ch, int uah)
++{
++	if (uah < 0 || uah / 1000 > INT_MAX / RK818_GASCNT_PER_MAH)
++		return -ERANGE;
++
++	return rk818_write32(ch->regmap, RK818_GASCNT_CAL3_REG,
++			     uah / 1000 * RK818_GASCNT_PER_MAH);
++}
++
++/* Keep the vendor kernel's view of the state of charge up to date */
++static int rk818_save_gauge(struct rk818_charger *ch, int uah, int full_uah)
++{
++	int mah, soc, ret;
++
++	uah = clamp(uah, 0, full_uah);
++	mah = uah / 1000;
++	soc = DIV_ROUND_CLOSEST_ULL((u64)mah * 100000, full_uah);
++
++	if (mah != ch->saved_mah) {
++		ret = rk818_write32(ch->regmap, RK818_DATA_REMAIN_REG, mah);
++		if (ret)
++			return ret;
++		ch->saved_mah = mah;
++	}
++
++	if (soc != ch->saved_soc) {
++		ret = rk818_update(ch->regmap, RK818_DATA_SOC_REG, 0xff, soc);
++		if (ret)
++			return ret;
++		ch->saved_soc = soc;
++	}
++
++	return 0;
++}
++
++/* Remaining charge from the open circuit voltage */
++static int rk818_ocv_charge(struct rk818_charger *ch, int uv, int full_uah)
++{
++	return div_u64((u64)full_uah * rk818_voltage_capacity(ch, uv), 100);
++}
++
++static int rk818_gauge_init(struct rk818_charger *ch)
++{
++	unsigned int sts, flags, timer, last, mask;
++	int full, cnt, uah, ret;
++	bool long_rest, reseed, cal;
++	__be16 ocv;
++
++	ret = rk818_read_charge_full(ch, &full);
++	if (ret)
++		return ret;
++	ret = rk818_read_gascnt(ch, &cnt);
++	if (ret)
++		return ret;
++	ret = regmap_read(ch->regmap, RK818_GGSTS_REG, &sts);
++	if (ret)
++		return ret;
++	ret = regmap_read(ch->regmap, RK818_DATA_FLAGS_REG, &flags);
++	if (ret)
++		return ret;
++	ret = regmap_read(ch->regmap, RK818_NON_ACT_TIMER_REG, &timer);
++	if (ret)
++		return ret;
++	ret = regmap_read(ch->regmap, RK818_DATA_TIMER_REG, &last);
++	if (ret)
++		return ret;
++
++	long_rest = timer != last && timer > RK818_LONG_REST;
++	mask = RK818_FLAGS_RESEED | (long_rest ? RK818_FLAGS_RESEED_REST : 0);
++	reseed = (sts & RK818_GGSTS_BAT_CON) || (flags & mask) ||
++		 (long_rest && !(flags & RK818_FLAGS_VALID));
++
++	if (reseed) {
++		ret = regmap_bulk_read(ch->regmap, RK818_BAT_OCV_REGH, &ocv, sizeof(ocv));
++		if (ret)
++			return ret;
++		uah = rk818_ocv_charge(ch, rk818_raw_to_uv(ch, be16_to_cpu(ocv)), full);
++		uah = clamp(uah, 0, full);
++		cal = true;
++	} else if (cnt < 0) {
++		uah = 0;
++		cal = true;
++	} else {
++		/* Only rewrite the counter when it ran past the full capacity */
++		uah = rk818_cnt_to_uah(cnt);
++		cal = uah > full;
++		uah = min(uah, full);
++	}
++
++	if (cal) {
++		ret = rk818_write_gascnt(ch, uah);
++		if (ret)
++			return ret;
++	}
++
++	ret = rk818_save_gauge(ch, uah, full);
++	if (ret)
++		return ret;
++
++	ret = rk818_update(ch->regmap, RK818_GGSTS_REG, RK818_GGSTS_BAT_CON, 0);
++	if (ret)
++		return ret;
++
++	/* Clear the flags that were acted on, and the valid flag */
++	ret = rk818_update(ch->regmap, RK818_DATA_FLAGS_REG,
++			   (flags & mask) | RK818_FLAGS_VALID, 0);
++	if (ret)
++		return ret;
++
++	return rk818_update(ch->regmap, RK818_DATA_TIMER_REG, 0xff, timer);
++}
++
++/* Called with lock held */
++static int rk818_gauge_update(struct rk818_charger *ch)
++{
++	unsigned int sup, mon;
++	int uv, ua, full, cnt, uah, est, ret;
++	bool plugged;
++
++	ret = regmap_read(ch->regmap, RK818_SUP_STS_REG, &sup);
++	if (ret)
++		return ret;
++	if (!(sup & RK818_SUP_STS_BAT_EXS))
++		return -ENODATA;
++
++	ret = rk818_read_voltage(ch, &uv);
++	if (ret)
++		return ret;
++	ret = rk818_read_current(ch, &ua);
++	if (ret)
++		return ret;
++	ret = regmap_read(ch->regmap, RK808_VB_MON_REG, &mon);
++	if (ret)
++		return ret;
++	plugged = mon & RK818_PLUG_IN_STS;
++
++	ret = rk818_read_charge_full(ch, &full);
++	if (ret)
++		return ret;
++	ret = rk818_read_gascnt(ch, &cnt);
++	if (ret)
++		return ret;
++	uah = rk818_cnt_to_uah(cnt);
++
++	/* Charge terminated near the charge voltage: the battery is full */
++	if (plugged && ua >= 0 &&
++	    FIELD_GET(RK818_SUP_STS_CHG_STS, sup) == RK818_CHG_TERM &&
++	    uv >= ch->cv_uv - 150000) {
++		if (uah != full) {
++			ret = rk818_write_gascnt(ch, full);
++			if (ret)
++				return ret;
++		}
++		ch->neg_cnt = false;
++		return rk818_save_gauge(ch, full, full);
++	}
++
++	if (uah > full) {
++		ret = rk818_write_gascnt(ch, full);
++		if (ret)
++			return ret;
++		ch->neg_cnt = false;
++		return rk818_save_gauge(ch, full, full);
++	}
++
++	if (cnt >= 0) {
++		ch->neg_cnt = false;
++		return rk818_save_gauge(ch, uah, full);
++	}
++
++	/* A counter that stays negative is replaced by a voltage estimate */
++	if (!ch->neg_cnt) {
++		ch->neg_cnt = true;
++		ch->neg_cnt_since = jiffies;
++	}
++	if (time_before(jiffies, ch->neg_cnt_since + msecs_to_jiffies(RK818_NEG_CNT_MS)))
++		return rk818_save_gauge(ch, 0, full);
++
++	est = uv - (int)div_s64((s64)ua * ch->ir_uohm, 1000000);
++	est = clamp(est, ch->vmin_uv, ch->vmax_uv);
++	uah = rk818_ocv_charge(ch, est, full);
++
++	ret = rk818_write_gascnt(ch, uah);
++	if (ret)
++		return ret;
++	ch->neg_cnt = false;
++	return rk818_save_gauge(ch, uah, full);
++}
++
+ static int rk818_bat_status(struct rk818_charger *ch, int *status)
+ {
+ 	unsigned int sup;
+@@ -544,6 +791,14 @@
+ 	if (ret)
+ 		dev_err_ratelimited(ch->dev, "input current update failed: %d\n", ret);
+ 
++	mutex_lock(&ch->lock);
++	ret = rk818_gauge_update(ch);
++	if (ret)
++		ch->neg_cnt = false;
++	mutex_unlock(&ch->lock);
++	if (ret)
++		dev_err_ratelimited(ch->dev, "fuel gauge update failed: %d\n", ret);
++
+ 	power_supply_changed(ch->bat);
+ 	power_supply_changed(ch->ac);
+ 	power_supply_changed(ch->usb);
+@@ -826,6 +1081,13 @@
+ 	ret = devm_mutex_init(dev, &ch->lock);
+ 	if (ret)
+ 		return ret;
++	ch->saved_mah = -1;
++	ch->saved_soc = -1;
++
++	ret = rk818_update(ch->regmap, RK818_TS_CTRL_REG, RK818_TS_CTRL_GG_EN,
++			   RK818_TS_CTRL_GG_EN);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to enable fuel gauge\n");
+ 
+ 	ret = rk818_read_calibration(ch);
+ 	if (ret)
+@@ -850,6 +1112,16 @@
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to initialize charger\n");
+ 
++	ret = rk818_update(ch->regmap, RK818_GGCON_REG, RK818_GGCON_INTERV_MASK, 0);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to set gauge sampling\n");
++
++	mutex_lock(&ch->lock);
++	ret = rk818_gauge_init(ch);
++	mutex_unlock(&ch->lock);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to initialize fuel gauge\n");
++
+ 	ch->ac = devm_power_supply_register(dev, &rk818_ac_desc, &cfg);
+ 	if (IS_ERR(ch->ac))
+ 		return dev_err_probe(dev, PTR_ERR(ch->ac), "failed to register AC supply\n");

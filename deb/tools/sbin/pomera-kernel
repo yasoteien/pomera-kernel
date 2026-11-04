@@ -1,0 +1,240 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 yasoteien
+# 自前カーネル（KRNL と RSCE の組）を「次の起動で 1 回だけ試し、正常なら確定、だめなら元の組で起き直す」形で入れ替える。
+# pomera-kernel-tools の一部。apt（postinst）は stage するだけで、SD の 12MiB・24MiB には書かない。書くのは confirm だけ。
+#
+#   pomera-kernel status              12MiB・24MiB に入っている組、待っている版、前回の結果
+#   pomera-kernel list                入っている版（/usr/lib/pomera-kernel/<版>/）
+#   pomera-kernel stage <版>          次の起動で試す版にする（postinst が呼ぶ）
+#   pomera-kernel unstage             試す予定を取り消す
+#   pomera-kernel boot-trial          （pomera-kernel-trial.service）待っている版があれば watchdog を動かして kexec する
+#   pomera-kernel confirm             （pomera-kernel-confirm.service）試しの起動が正常なら組を 12MiB・24MiB に書いて確定する
+#   pomera-kernel rollback            退避した組（prev）と今の組を入れ替える（次の起動から前の組。もう一度流せば戻る）
+#   pomera-kernel keep                apt の autoremove が消さない版（今の組・1 つ前の組・動いている版・待っている版）を
+#                                     /etc/apt/apt.conf.d/01pomera-kernel-autoremove に書き直す（stage・confirm・rollback の後にも流れる）
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+LIB=/usr/lib/pomera-kernel
+VAR=/var/lib/pomera-kernel
+DEV=/dev/mmcblk1
+KRNL_OFF=12   # MiB
+RSCE_OFF=24   # MiB
+OPEN_TIMEOUT=240
+HEALTH_WAIT=90
+
+log() { echo "pomera-kernel: $*" >&2; logger -t pomera-kernel -- "$*" 2>/dev/null || true; }
+die() { log "$*"; exit 1; }
+
+need_root() { [ "$(id -u)" = 0 ] || die "root で実行してください"; }
+
+# 受け入れる機種（並べた物と完全に一致した時だけ。2026-11-04、保証できるのは DM250 の日本版だけ）。
+# 値は試験 SD の Pomera の /proc/device-tree から読んだ物（NUL 区切りの compatible は空白でつないで比べる）。
+# preinst（build-deb.sh）にも同じ表がある。変える時は両方を変える。
+OK_MODELS=("King Jim Pomera DM250")
+OK_COMPATS=("kingjim,pomera-dm250 rockchip,rk3128")
+
+machine_ok() {
+	local model compat m c
+	model=$(tr -d '\000' < /proc/device-tree/model 2>/dev/null) || return 1
+	compat=$(tr '\000' ' ' < /proc/device-tree/compatible 2>/dev/null | sed 's/ $//') || return 1
+	for m in "${OK_MODELS[@]}"; do
+		[ "$model" = "$m" ] || continue
+		for c in "${OK_COMPATS[@]}"; do [ "$compat" = "$c" ] && return 0; done
+	done
+	return 1
+}
+
+# MiB の位置の先頭 4 バイト（dd | head だと head が先に閉じて dd が Broken pipe を出す）
+magic() { dd if=$DEV bs=4 count=1 iflag=skip_bytes skip=$(( $1 << 20 )) status=none; }
+
+# 書いてよい機械か: 受け入れる機種・SD から起動・12MiB が KRNL・24MiB が RSCE・p1 が 25MiB より後
+check_device() {
+	machine_ok || die "受け入れる機種ではない（model・compatible が DM250 の日本版と一致しない）。何もしない"
+	[ "$(findmnt -n -o SOURCE /)" = "${DEV}p2" ] || die "/ が ${DEV}p2 でない（SD から起動していない）。何もしない"
+	[ "$(magic $KRNL_OFF)" = KRNL ] || die "12MiB が KRNL でない。何もしない"
+	[ "$(magic $RSCE_OFF)" = RSCE ] || die "24MiB が RSCE でない。何もしない"
+	local p1
+	p1=$(cat /sys/class/block/mmcblk1p1/start 2>/dev/null || echo 0)
+	[ "$p1" -ge $(( (RSCE_OFF + 1) * 2048 )) ] || die "p1 が 24MiB の RSCE と重なる（start=$p1）。何もしない"
+}
+
+valid_ver() { [[ "$1" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]] || die "版の名前が違う: $1（6.18.<数>-<印>）"; }
+
+# 版の組がそろっているか（sha256sums で照合）
+check_set() {
+	local d=$LIB/$1
+	[ -f "$d/krnl-12M.bin" ] && [ -f "$d/rsce.bin" ] && [ -f "$d/dtb" ] && [ -d "/usr/lib/modules/$1" ] ||
+		die "$1 の組がそろっていない"
+	(cd "$d" && sha256sum --quiet -c sha256sums) || die "$1 の組の sha256 が合わない"
+}
+
+region_sha() { dd if=$DEV bs=1M skip="$1" count="$2" iflag=direct status=none | sha256sum | cut -d' ' -f1; }
+
+# krnl・rsce の sha256 の組の名前（入っている版の sha256sums と比べる）
+pair_name() {
+	local k=$1 r=$2 d v
+	for d in "$LIB"/*/; do
+		v=$(basename "$d")
+		[ -f "$LIB/$v/sha256sums" ] || continue
+		if grep -q "^$k  krnl-12M.bin$" "$LIB/$v/sha256sums" && grep -q "^$r  rsce.bin$" "$LIB/$v/sha256sums"; then
+			echo "$v"; return
+		fi
+	done
+	echo "不明（作者のカーネルか、入っていない版。krnl ${k:0:12}… rsce ${r:0:12}…）"
+}
+
+# 12MiB・24MiB に入っている物の名前
+which_pair() { pair_name "$(region_sha $KRNL_OFF 12)" "$(region_sha $RSCE_OFF 1)"; }
+
+KEEP_CONF=/etc/apt/apt.conf.d/01pomera-kernel-autoremove
+
+# apt の autoremove が消さない版を書く（2026-11-04 のユーザーの決定: 古い版は autoremove、今の版と 1 つ前は残す）。
+# 今の組（12MiB・24MiB）・1 つ前の組（prev）・動いている版・待っている版のうち、入っているパッケージの物だけ。
+# Debian の linux-image の 01autoremove-kernels と同じ APT::NeverAutoRemove の形。
+write_keep() {
+	local v vs=() t
+	for v in "$(which_pair 2>/dev/null || true)" "$( [ -f "$VAR/prev/sha256sums" ] && prev_name 2>/dev/null || true)" \
+		"$(uname -r)" "$(cat "$VAR/pending" 2>/dev/null || true)"; do
+		[[ "$v" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]] && [ -d "$LIB/$v" ] || continue
+		[[ " ${vs[*]} " == *" $v "* ]] || vs+=("$v")
+	done
+	t=$(mktemp "$KEEP_CONF.XXXXXX")
+	{
+		echo "// pomera-kernel keep が書く（手で変えない）。今の組・1 つ前の組・動いている版・待っている版"
+		echo "APT::NeverAutoRemove {"
+		for v in "${vs[@]}"; do printf '\t"^pomera-kernel-%s$";\n' "${v//./\\.}"; done
+		echo "};"
+	} > "$t"
+	chmod 0644 "$t"; mv "$t" "$KEEP_CONF"
+}
+
+# 退避した組（$VAR/prev）の名前
+prev_name() {
+	pair_name "$(awk '$2 == "krnl-12M.bin" {print $1}' "$VAR/prev/sha256sums")" \
+		"$(awk '$2 == "rsce.bin" {print $1}' "$VAR/prev/sha256sums")"
+}
+
+arm_watchdog() {
+	# systemd は kexec の時に watchdog を動かさない（2026-11-02 に確かめた）ので、ここで 600 秒にして閉じる（V は書かない）。
+	# 古いカーネルが 600 秒まで ping し、kexec の後は新しいカーネルの dw_wdt が open_timeout まで ping する。
+	python3 - <<'PY'
+import fcntl, os, struct
+fd = os.open("/dev/watchdog", os.O_WRONLY)
+fcntl.ioctl(fd, 0xC0045706, struct.pack("i", 600))   # WDIOC_SETTIMEOUT
+os.write(fd, b"\0")
+os.close(fd)
+PY
+}
+
+write_region() {  # $1 = ファイル, $2 = MiB の位置
+	local f=$1 off=$2 n h
+	n=$(( ($(stat -c %s "$f") + 1048575) / 1048576 ))
+	h=$(sha256sum "$f" | cut -d' ' -f1)
+	dd if="$f" of=$DEV bs=1M seek="$off" conv=fsync,notrunc status=none
+	sync; blockdev --flushbufs $DEV; echo 3 > /proc/sys/vm/drop_caches
+	[ "$(region_sha "$off" "$n")" = "$h" ] || die "書いた $f が読み戻しで合わない（$off MiB）"
+}
+
+save_pair() {  # 今の 12MiB・24MiB を $1（既定 $VAR/prev）に退避
+	local d=${1:-$VAR/prev}
+	mkdir -p "$d"
+	dd if=$DEV of="$d/krnl-12M.bin" bs=1M skip=$KRNL_OFF count=12 iflag=direct status=none
+	dd if=$DEV of="$d/rsce.bin" bs=1M skip=$RSCE_OFF count=1 iflag=direct status=none
+	(cd "$d" && sha256sum krnl-12M.bin rsce.bin > sha256sums)
+	[ "$(sha256sum < "$d/krnl-12M.bin" | cut -d' ' -f1)" = "$(region_sha $KRNL_OFF 12)" ] || die "退避が合わない"
+}
+
+case "${1:-}" in
+status)
+	echo "12MiB・24MiB の組: $(which_pair 2>/dev/null || echo '読めない（root で）')"
+	echo "動いている版: $(uname -r)$(grep -q 'pomera\.trial=' /proc/cmdline && echo '（試しの起動）')"
+	[ -f "$VAR/pending" ] && echo "次の起動で試す版: $(cat "$VAR/pending")"
+	[ -f "$VAR/trying" ] && echo "試している版: $(cat "$VAR/trying")"
+	[ -f "$VAR/last" ] && echo "前回の結果: $(cat "$VAR/last")"
+	[ -f "$VAR/prev/sha256sums" ] && echo "戻せる組: $(prev_name 2>/dev/null || echo '読めない')（$VAR/prev。pomera-kernel rollback）"
+	exit 0
+	;;
+list) for d in "$LIB"/*/; do [ -d "$d" ] && basename "$d"; done; exit 0 ;;
+esac
+
+need_root
+mkdir -p "$VAR"
+case "${1:-}" in
+stage)
+	V=${2:?版}; valid_ver "$V"; check_set "$V"
+	# 12MiB・24MiB にもう入っている版は試さない（入れ直しの dpkg -i で同じ版を kexec しない）
+	if [ "$(which_pair)" = "$V" ]; then
+		rm -f "$VAR/pending"; write_keep; log "$V はもう 12MiB・24MiB に入っている。試す予定は作らない"; exit 0
+	fi
+	echo "$V" > "$VAR/pending"; rm -f "$VAR/failed-$V"; write_keep
+	log "次の起動で $V を 1 回だけ試す（正常なら確定、だめなら今の組で起き直す）"
+	;;
+unstage) rm -f "$VAR/pending"; write_keep; log "試す予定を取り消した" ;;
+keep) write_keep ;;
+boot-trial)
+	# 試しの起動の中では何もしない（confirm の出番）
+	grep -q 'pomera\.trial=' /proc/cmdline && exit 0
+	# 前回の試しが確定しないまま戻ってきた＝試しが失敗した。同じ版は二度と自動では試さない
+	if [ -f "$VAR/trying" ]; then
+		V=$(cat "$VAR/trying"); rm -f "$VAR/trying"
+		: > "$VAR/failed-$V"
+		[ "$(cat "$VAR/pending" 2>/dev/null)" = "$V" ] && rm -f "$VAR/pending"
+		echo "$(date -Is) $V の試しは確定しなかった（watchdog で今の組に戻った）" > "$VAR/last"
+		log "$V の試しは確定しなかった。今の組のまま。もう一度試すなら pomera-kernel stage $V"
+		exit 0
+	fi
+	[ -f "$VAR/pending" ] || exit 0
+	V=$(cat "$VAR/pending"); valid_ver "$V"
+	[ -f "$VAR/failed-$V" ] && { log "$V は前に失敗している。試さない"; rm -f "$VAR/pending"; exit 0; }
+	check_device; check_set "$V"
+	CMD="$(sed -e 's/ *pomera\.trial=[^ ]*//' -e 's/ *watchdog\.open_timeout=[^ ]*//' -e 's/ *resume=[^ ]*//' /proc/cmdline) watchdog.open_timeout=$OPEN_TIMEOUT pomera.trial=$V"
+	# 試験の口: $VAR/extra-cmdline があれば足す（わざと起動しない版の試験用。1 回で消す）
+	if [ -f "$VAR/extra-cmdline" ]; then CMD="$CMD $(head -c 200 "$VAR/extra-cmdline")"; rm -f "$VAR/extra-cmdline"; fi
+	Z=$(mktemp -p /run pomera-kernel-zImage.XXXXXX)
+	LEN=$(od -An -tu4 -j4 -N4 "$LIB/$V/krnl-12M.bin" | tr -d ' ')
+	dd if="$LIB/$V/krnl-12M.bin" of="$Z" bs=1M iflag=skip_bytes,count_bytes skip=8 count="$LEN" status=none
+	kexec -l "$Z" --dtb="$LIB/$V/dtb" --command-line="$CMD"
+	echo "$V" > "$VAR/trying"; rm -f "$VAR/pending"; sync
+	log "$V を試す（kexec）。$OPEN_TIMEOUT 秒の間に確定できなければ watchdog で今の組に戻る"
+	arm_watchdog
+	systemctl --no-block kexec
+	;;
+confirm)
+	V=$(sed -n 's/.*pomera\.trial=\([^ ]*\).*/\1/p' /proc/cmdline)
+	[ -n "$V" ] || exit 0
+	[ "$(uname -r)" = "$V" ] || die "試しの版 $V と動いている版 $(uname -r) が違う。確定しない"
+	# 正常の条件（2026-11-04 のユーザーの決定）: systemd が running になる（degraded・失敗なら確定しない）。確定までの起動は 1 回
+	st=
+	for _ in $(seq "$HEALTH_WAIT"); do
+		st=$(systemctl is-system-running 2>/dev/null || true)
+		case $st in running) break ;; degraded|maintenance|stopping) break ;; esac
+		sleep 1
+	done
+	[ "$st" = running ] || die "試しの起動が正常でない（systemctl is-system-running = $st）。確定しない（watchdog で今の組に戻る）"
+	check_device; check_set "$V"
+	save_pair
+	write_region "$LIB/$V/krnl-12M.bin" $KRNL_OFF
+	write_region "$LIB/$V/rsce.bin" $RSCE_OFF
+	# kernel の ping に戻す（dw_wdt は止められないので、以後は kernel が ping し続ける）
+	printf V > /dev/watchdog
+	rm -f "$VAR/trying"; echo "$V" > "$VAR/current"; write_keep
+	echo "$(date -Is) $V を確定した（前の組は $VAR/prev）" > "$VAR/last"
+	log "$V を確定した。前の組は $VAR/prev（pomera-kernel rollback で戻せる）"
+	;;
+rollback)
+	[ -d "$VAR/prev" ] || die "戻せる組が無い"
+	check_device
+	(cd "$VAR/prev" && sha256sum --quiet -c sha256sums) || die "退避した組の sha256 が合わない"
+	# 今の組と退避した組を入れ替える（rollback をもう一度流せば元に戻る）
+	rm -rf "$VAR/prev.new"; save_pair "$VAR/prev.new"
+	write_region "$VAR/prev/krnl-12M.bin" $KRNL_OFF
+	write_region "$VAR/prev/rsce.bin" $RSCE_OFF
+	rm -rf "$VAR/prev"; mv "$VAR/prev.new" "$VAR/prev"
+	rm -f "$VAR/current"; write_keep
+	echo "$(date -Is) 退避した組に戻した（次の起動から。戻す前の組は $VAR/prev）" > "$VAR/last"
+	log "退避した組に戻した。次の起動から前の組で起きる（戻す前の組は $VAR/prev に入れ替えた）"
+	;;
+*) sed -n '4,15p' "$0"; exit 2 ;;
+esac

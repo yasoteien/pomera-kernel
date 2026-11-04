@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 yasoteien
+[Unit]
+Description=Confirm the Pomera kernel being tried (write KRNL and RSCE as a pair)
+Documentation=file:/usr/share/doc/pomera-kernel-tools/README.md
+ConditionKernelCommandLine=pomera.trial
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/pomera-kernel confirm

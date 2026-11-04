@@ -1,0 +1,82 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] ARM: rockchip: Use s2idle on the RK3128
+
+The RK3128 has no deep sleep support here, so it uses s2idle only.
+Enable timer5 for the cores and clear usb480_src_sel in CRU_MISC_CON
+before the clocks are set up, as the vendor kernel does, so that the
+cores behave as with that kernel.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff -urN a/arch/arm/mach-rockchip/pm.c b/arch/arm/mach-rockchip/pm.c
+--- a/arch/arm/mach-rockchip/pm.c	2026-07-30 20:05:57.000000000 +0900
++++ b/arch/arm/mach-rockchip/pm.c	2026-11-02 22:49:50.133868709 +0900
+@@ -307,6 +307,10 @@
+ 	struct device_node *np;
+ 	int ret;
+ 
++	/* RK3128 has no deep sleep support here; it uses s2idle only. */
++	if (of_machine_is_compatible("rockchip,rk3128"))
++		return;
++
+ 	np = of_find_matching_node_and_match(NULL, rockchip_pmu_of_device_ids,
+ 					     &match);
+ 	if (!match) {
+diff -urN a/arch/arm/mach-rockchip/rockchip.c b/arch/arm/mach-rockchip/rockchip.c
+--- a/arch/arm/mach-rockchip/rockchip.c	2026-07-30 20:05:57.000000000 +0900
++++ b/arch/arm/mach-rockchip/rockchip.c	2026-11-02 22:49:50.133868709 +0900
+@@ -17,10 +17,46 @@
+ #include "core.h"
+ #include "pm.h"
+ 
++#define RK3128_TIMER5_PHYS 0x200440a0
++#define RK3128_CRU_PHYS 0x20000000
++#define RK3128_CRU_MISC_CON 0x134
+ #define RK3288_TIMER6_7_PHYS 0xff810000
+ 
+ static void __init rockchip_timer_init(void)
+ {
++	if (of_machine_is_compatible("rockchip,rk3128")) {
++		void __iomem *reg_base;
++
++		/*
++		 * The vendor kernel enables timer5 for the cores and clears
++		 * usb480_src_sel in CRU_MISC_CON before the clocks are set up.
++		 * Do the same so that the cores behave as with that kernel.
++		 */
++		reg_base = ioremap(RK3128_TIMER5_PHYS, SZ_4K);
++		if (reg_base) {
++			writel_relaxed(0, reg_base + 0x10);
++			dsb();
++			writel_relaxed(0xffffffff, reg_base + 0x00);
++			writel_relaxed(0xffffffff, reg_base + 0x04);
++			dsb();
++			writel_relaxed(1, reg_base + 0x10);
++			dsb();
++			iounmap(reg_base);
++
++			reg_base = ioremap(RK3128_CRU_PHYS, SZ_4K);
++			if (reg_base) {
++				writel_relaxed(0x80000000,
++					       reg_base + RK3128_CRU_MISC_CON);
++				dsb();
++				iounmap(reg_base);
++			} else {
++				pr_err("rockchip: could not map CRU registers\n");
++			}
++		} else {
++			pr_err("rockchip: could not map timer5 registers\n");
++		}
++	}
++
+ 	if (of_machine_is_compatible("rockchip,rk3288")) {
+ 		void __iomem *reg_base;
+ 
+@@ -56,6 +92,7 @@
+ 	"rockchip,rk3066a",
+ 	"rockchip,rk3066b",
+ 	"rockchip,rk3188",
++	"rockchip,rk3128",
+ 	"rockchip,rk3228",
+ 	"rockchip,rk3288",
+ 	"rockchip,rv1108",

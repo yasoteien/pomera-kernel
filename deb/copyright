@@ -1,0 +1,29 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Linux (Pomera DM250)
+Upstream-Contact: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Source: https://cdn.kernel.org/pub/linux/kernel/v6.x/ (6.18 longterm) with the DM250 patches (kernel/stable/patches)
+
+Files: *
+Copyright: 1991-2026 Linus Torvalds and the Linux kernel contributors
+           2026 yasoteien (DM250 patches)
+License: GPL-2
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License version 2 as published
+ by the Free Software Foundation.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in "/usr/share/common-licenses/GPL-2".
+
+Files: usr/sbin/pomera-kernel
+       usr/libexec/pomera-kernel/*
+       usr/lib/systemd/system/pomera-kernel-*
+       usr/lib/systemd/system/systemd-hibernate.service.d/*
+Copyright: 2026 yasoteien
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in "/usr/share/common-licenses/GPL-2".

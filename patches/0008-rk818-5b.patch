@@ -1,0 +1,259 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] power: supply: rk818: Set the USB input current limit
+
+Write the USB input current limit (USB_CTRL_REG bits 3:0) by the type
+of the source. Nothing else is written.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff -ruN a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+--- a/drivers/power/supply/rk818_charger.c	2026-11-02 23:00:46.057878449 +0900
++++ b/drivers/power/supply/rk818_charger.c	2026-11-02 23:01:57.608569026 +0900
+@@ -7,12 +7,14 @@
+  * vendor kernel of that device, so that both kernels can be booted on
+  * one machine without upsetting each other's state of charge.
+  *
+- * Stage 5a: read only. No register is written.
++ * Stage 5b: only the USB input current limit (USB_CTRL_REG bits 3:0) is
++ * written.
+  */
+ 
+ #include <linux/bitfield.h>
+ #include <linux/devm-helpers.h>
+ #include <linux/extcon.h>
++#include <linux/interrupt.h>
+ #include <linux/mfd/rk808.h>
+ #include <linux/minmax.h>
+ #include <linux/module.h>
+@@ -23,23 +25,6 @@
+ #include <linux/regmap.h>
+ #include <linux/workqueue.h>
+ 
+-/*
+- * Stage 5a must not write to the PMIC. Every regmap write becomes a build
+- * error, so a write cannot slip in unnoticed.
+- */
+-#define RK818_READ_ONLY()	BUILD_BUG_ON_MSG(1, "rk818-charger 5a is read only")
+-#define regmap_write(...)		RK818_READ_ONLY()
+-#define regmap_write_async(...)		RK818_READ_ONLY()
+-#define regmap_raw_write(...)		RK818_READ_ONLY()
+-#define regmap_bulk_write(...)		RK818_READ_ONLY()
+-#define regmap_multi_reg_write(...)	RK818_READ_ONLY()
+-#define regmap_update_bits(...)		RK818_READ_ONLY()
+-#define regmap_update_bits_base(...)	RK818_READ_ONLY()
+-#define regmap_write_bits(...)		RK818_READ_ONLY()
+-#define regmap_set_bits(...)		RK818_READ_ONLY()
+-#define regmap_clear_bits(...)		RK818_READ_ONLY()
+-#define regmap_assign_bits(...)		RK818_READ_ONLY()
+-
+ #define RK818_PLUG_IN_STS		BIT(6)	/* RK808_VB_MON_REG */
+ 
+ #define RK818_SUP_STS_BAT_EXS		BIT(7)
+@@ -61,6 +46,45 @@
+ #define RK818_CUR_UA_PER_LSB		1506
+ #define RK818_OCV_TEMP_C		20
+ 
++/*
++ * The registers this stage may write and the bits in them. Every write
++ * goes through rk818_update(); a direct regmap write is a build error.
++ */
++static const struct {
++	u8 reg;
++	u8 mask;
++} rk818_writable[] = {
++	{ RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK },
++};
++
++static int rk818_update(struct regmap *map, unsigned int reg,
++			unsigned int mask, unsigned int val)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(rk818_writable); i++)
++		if (reg == rk818_writable[i].reg &&
++		    !(mask & ~rk818_writable[i].mask))
++			return regmap_update_bits(map, reg, mask, val);
++
++	WARN_ONCE(1, "rk818-charger: write to %#x mask %#x is not allowed\n",
++		  reg, mask);
++	return -EPERM;
++}
++
++#define RK818_NO_WRITE()	BUILD_BUG_ON_MSG(1, "rk818-charger: use rk818_update()")
++#define regmap_write(...)		RK818_NO_WRITE()
++#define regmap_write_async(...)		RK818_NO_WRITE()
++#define regmap_raw_write(...)		RK818_NO_WRITE()
++#define regmap_bulk_write(...)		RK818_NO_WRITE()
++#define regmap_multi_reg_write(...)	RK818_NO_WRITE()
++#define regmap_update_bits(...)		RK818_NO_WRITE()
++#define regmap_update_bits_base(...)	RK818_NO_WRITE()
++#define regmap_write_bits(...)		RK818_NO_WRITE()
++#define regmap_set_bits(...)		RK818_NO_WRITE()
++#define regmap_clear_bits(...)		RK818_NO_WRITE()
++#define regmap_assign_bits(...)		RK818_NO_WRITE()
++
+ enum rk818_chg_sts {
+ 	RK818_CHG_OFF,
+ 	RK818_CHG_WAKEUP,
+@@ -86,6 +110,7 @@
+ 	struct power_supply *ac;
+ 	struct power_supply *usb;
+ 	struct extcon_dev *edev;
++	struct notifier_block nb;
+ 	struct delayed_work work;
+ 	/* Serialises use of the fuel gauge */
+ 	struct mutex lock;
+@@ -450,10 +475,54 @@
+ 	return 0;
+ }
+ 
++static int rk818_ilim_sel(int ua)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(rk818_ilim_ua); i++)
++		if (rk818_ilim_ua[i] == ua)
++			return i;
++	return -EINVAL;
++}
++
++/* DCP: the DT limit, CDP: at most 1.5 A, anything else: 450 mA */
++static int rk818_update_input(struct rk818_charger *ch)
++{
++	int ua = rk818_ilim_ua[0];
++	bool plugged = false;
++	int sel, ret, err;
++
++	err = rk818_plugged(ch, &plugged);
++	if (!err && plugged) {
++		switch (rk818_source_type(ch)) {
++		case POWER_SUPPLY_USB_TYPE_DCP:
++			ua = ch->input_ua;
++			break;
++		case POWER_SUPPLY_USB_TYPE_CDP:
++			ua = min(ch->input_ua, 1500000);
++			break;
++		default:
++			break;
++		}
++	}
++
++	sel = rk818_ilim_sel(ua);
++	if (sel < 0)
++		return sel;
++
++	ret = rk818_update(ch->regmap, RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK, sel);
++	return ret ?: err;
++}
++
+ static void rk818_monitor_work(struct work_struct *work)
+ {
+ 	struct rk818_charger *ch = container_of(to_delayed_work(work),
+ 						struct rk818_charger, work);
++	int ret;
++
++	ret = rk818_update_input(ch);
++	if (ret)
++		dev_err_ratelimited(ch->dev, "input current update failed: %d\n", ret);
+ 
+ 	power_supply_changed(ch->bat);
+ 	power_supply_changed(ch->ac);
+@@ -463,6 +532,29 @@
+ 			   msecs_to_jiffies(RK818_MONITOR_MS));
+ }
+ 
++/* Back to 450 mA on every plug event until the monitor has looked */
++static irqreturn_t rk818_plug_irq(int irq, void *data)
++{
++	struct rk818_charger *ch = data;
++	int ret;
++
++	ret = rk818_update(ch->regmap, RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK, 0);
++	if (ret)
++		dev_err_ratelimited(ch->dev, "USB input limit reset failed: %d\n", ret);
++
++	mod_delayed_work(system_freezable_wq, &ch->work, 0);
++	return IRQ_HANDLED;
++}
++
++static int rk818_cable_changed(struct notifier_block *nb, unsigned long event,
++			       void *ptr)
++{
++	struct rk818_charger *ch = container_of(nb, struct rk818_charger, nb);
++
++	mod_delayed_work(system_freezable_wq, &ch->work, 0);
++	return NOTIFY_OK;
++}
++
+ static const enum power_supply_property rk818_bat_props[] = {
+ 	POWER_SUPPLY_PROP_PRESENT,
+ 	POWER_SUPPLY_PROP_STATUS,
+@@ -647,7 +739,7 @@
+ 	struct power_supply_config cfg = {};
+ 	struct device *dev = &pdev->dev;
+ 	struct rk818_charger *ch;
+-	int ret;
++	int irq_in, irq_out, ret;
+ 
+ 	ch = devm_kzalloc(dev, sizeof(*ch), GFP_KERNEL);
+ 	if (!ch)
+@@ -699,15 +791,58 @@
+ 	if (ret)
+ 		return ret;
+ 
++	if (ch->edev) {
++		ch->nb.notifier_call = rk818_cable_changed;
++		ret = devm_extcon_register_notifier_all(dev, ch->edev, &ch->nb);
++		if (ret)
++			return dev_err_probe(dev, ret, "failed to register charger notifier\n");
++	}
++
++	irq_in = platform_get_irq(pdev, 0);
++	if (irq_in < 0)
++		return irq_in;
++	irq_out = platform_get_irq(pdev, 1);
++	if (irq_out < 0)
++		return irq_out;
++
++	ret = devm_request_threaded_irq(dev, irq_in, NULL, rk818_plug_irq,
++					IRQF_ONESHOT, "rk818-plug-in", ch);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request plug-in IRQ\n");
++
++	ret = devm_request_threaded_irq(dev, irq_out, NULL, rk818_plug_irq,
++					IRQF_ONESHOT, "rk818-plug-out", ch);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request plug-out IRQ\n");
++
+ 	queue_delayed_work(system_freezable_wq, &ch->work, 0);
+-	dev_info(dev, "RK818 battery monitor initialized (read only)\n");
++	dev_info(dev, "RK818 battery monitor initialized\n");
+ 	return 0;
+ }
+ 
++static int rk818_charger_suspend(struct device *dev)
++{
++	struct rk818_charger *ch = dev_get_drvdata(dev);
++
++	return rk818_update(ch->regmap, RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK, 0);
++}
++
++static int rk818_charger_resume(struct device *dev)
++{
++	struct rk818_charger *ch = dev_get_drvdata(dev);
++
++	mod_delayed_work(system_freezable_wq, &ch->work, 0);
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(rk818_charger_pm, rk818_charger_suspend,
++				rk818_charger_resume);
++
+ static struct platform_driver rk818_charger_driver = {
+ 	.probe = rk818_charger_probe,
+ 	.driver = {
+ 		.name = "rk818-charger",
++		.pm = pm_sleep_ptr(&rk818_charger_pm),
+ 	},
+ };
+ module_platform_driver(rk818_charger_driver);

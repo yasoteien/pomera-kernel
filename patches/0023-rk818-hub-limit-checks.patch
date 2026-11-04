@@ -1,0 +1,86 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] power: supply: rk818: Limit the powered hub input to 2 A
+
+Accept only 0 or a table value up to 2 A for unknown_max_ua, and cap
+it at 2 A where it is applied. Use the hub limit only while the
+source type is unknown; an SDP stays at 450 mA. Do not divide by zero
+when the voltage range is not set yet.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+--- a/drivers/power/supply/rk818_charger.c	2026-11-04 11:46:39.594806688 +0900
++++ b/drivers/power/supply/rk818_charger.c	2026-11-04 11:46:39.614806293 +0900
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
++ * Copyright (C) 2026 yasoteien
++ *
+  * Charger and fuel gauge driver for the Rockchip RK818 PMIC
+  *
+  * Written for the Pomera DM250. The register settings, the fuel gauge
+@@ -215,9 +217,10 @@ static const int rk818_ilim_ua[] = {
+ /*
+  * The input limit on a source the USB PHY does not recognise while a hub
+  * is seen on the port: such a hub has its own supply. 0 keeps such a
+- * source at 450 mA, as the vendor kernel does.
++ * source at 450 mA, as the vendor kernel does. At most 2 A.
+  */
+-static int unknown_max_ua = 2000000;
++#define RK818_HUB_MAX_UA	2000000
++static int unknown_max_ua = RK818_HUB_MAX_UA;
+ 
+ static int rk818_set_max_ua(const char *val, const struct kernel_param *kp)
+ {
+@@ -227,6 +230,9 @@ static int rk818_set_max_ua(const char *
+ 	if (ret)
+ 		return ret;
+ 
++	if (ua < 0 || ua > RK818_HUB_MAX_UA)
++		return -EINVAL;
++
+ 	/* 1 is skipped: 800 mA in the vendor kernel's table, 80 mA in the datasheet */
+ 	if (ua) {
+ 		for (i = 0; i < ARRAY_SIZE(rk818_ilim_ua); i++)
+@@ -488,9 +494,11 @@ static int rk818_voltage_capacity(struct
+ 
+ 	if (ch->ocv)
+ 		cap = power_supply_ocv2cap_simple(ch->ocv, ch->ocv_len, uv);
+-	else
++	else if (ch->vmax_uv > ch->vmin_uv)
+ 		cap = DIV_ROUND_CLOSEST((uv - ch->vmin_uv) * 100,
+ 					ch->vmax_uv - ch->vmin_uv);
++	else
++		cap = 0;	/* read before the battery info is in */
+ 
+ 	return clamp(cap, 0, 100);
+ }
+@@ -944,8 +952,9 @@ static int rk818_ilim_sel(int ua)
+ }
+ 
+ /*
+- * DCP: the DT limit, CDP: at most 1.5 A, a powered hub: unknown_max_ua,
+- * anything else: 450 mA. Called under ilim_lock.
++ * DCP: the DT limit, CDP: at most 1.5 A, a powered hub (only while the
++ * source is UNKNOWN): unknown_max_ua, at most 2 A, anything else (SDP
++ * included, even with hub_active left over): 450 mA. Called under ilim_lock.
+  */
+ static int rk818_update_input(struct rk818_charger *ch)
+ {
+@@ -964,9 +973,15 @@ static int rk818_update_input(struct rk8
+ 		case POWER_SUPPLY_USB_TYPE_CDP:
+ 			ua = min(ch->input_ua, 1500000);
+ 			break;
++		case POWER_SUPPLY_USB_TYPE_UNKNOWN:
++			if (ch->hub_active) {
++				int hub = min(READ_ONCE(unknown_max_ua), RK818_HUB_MAX_UA);
++
++				if (hub > 0)
++					ua = hub;
++			}
++			break;
+ 		default:
+-			if (ch->hub_active)
+-				ua = READ_ONCE(unknown_max_ua) ?: ua;
+ 			break;
+ 		}
+ 	}

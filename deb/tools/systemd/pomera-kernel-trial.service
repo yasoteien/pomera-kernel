@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 yasoteien
+[Unit]
+Description=Try a staged Pomera kernel once (kexec with a watchdog)
+Documentation=file:/usr/share/doc/pomera-kernel-tools/README.md
+After=multi-user.target
+ConditionKernelCommandLine=!pomera.trial
+ConditionPathExistsGlob=/var/lib/pomera-kernel/*
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/pomera-kernel boot-trial
+
+[Install]
+WantedBy=multi-user.target

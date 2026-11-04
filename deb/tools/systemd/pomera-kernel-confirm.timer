@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 yasoteien
+# 起動の流れの外で走らせる（中で走ると、自分が終わるまで is-system-running が running にならない）。
+# 確定は watchdog.open_timeout（240 秒）より前に終わる必要がある。st6 の起動は約 26.5 秒。
+[Unit]
+Description=Confirm a tried Pomera kernel shortly after boot
+ConditionKernelCommandLine=pomera.trial
+
+[Timer]
+OnBootSec=60
+
+[Install]
+WantedBy=timers.target
