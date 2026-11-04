@@ -10,7 +10,7 @@
 
 - これは試験版です。動くこと・品質・目的に合うことは保証しません（GPL の第 11・12 項のとおり無保証です）。使うのは自己責任でお願いします。
 - これを使って、ポメラの本体・SD カード・データに不具合や損失が起きても、私たち（yasoteien）は責任を負いません。
-- キングジム、および DM250 用 Debian イメージの配布元とは関係のない、非公式の物です。両者に問い合わせないでください。
+- キングジム、および ichinomoto 氏が ekesete.net（https://www.ekesete.net/log/?p=9565）で公開している DM250 用 Debian 13 イメージ（以下「イメージ」）とは関係のない、非公式の物です。両者に問い合わせないでください。
 - 入れる前に、SD カードの写し（イメージ）を取ってください。
 - 戻し方: `sudo pomera-kernel rollback`（1 つ前の組に戻す。U-Boot も一緒に戻ります）。起動しなくなった時は、SD カードを抜けば本体の純正のソフトで起動します。SD カードは、取っておいた写しで戻してください。
 
@@ -60,18 +60,18 @@ FDTP を使っている人は、FDTP の `./configure`（`.deb` 版なら `sudo 
 
 再起動すると、次の順で進みます。
 
-1. まず、今のカーネルで起動します。
+1. まず、今のカーネル（初めて入れる時は、イメージのカーネル）で起動します。
 2. 起動の途中で pomera-kernel に移ります（kexec）。画面が一度消えて、また出ます。
 3. 正常に起動すれば（systemd が running）、約 2 分後に自動で確定し、カーネル・デバイスツリー・U-Boot を組で SD カードに書きます。以後は新しい組（カーネルと U-Boot）で起動します。
    - カーネルとデバイスツリーは、SD カードの 2 つの置き場（組 A・組 B）のうち、今使っていない方に書きます。どちらで起動するかは小さな表で U-Boot に伝えるので、書いている途中で電源が落ちても、次の起動は前の組か新しい組のどちらかです。
-   - DM250 用の Debian イメージのカーネル（SD カードの 12MiB・24MiB）は書き換えません。
+   - イメージのカーネル（SD カードの 12MiB・24MiB）は書き換えません。
    - 初めて U-Boot を書く時は、元の U-Boot の写しと戻し方（`RESTORE.txt`）を、SD カードの最初の区画（FAT）の `pomera-kernel/` に置きます。
-4. うまく起動しなければ、watchdog で約 5 分以内に自動で今のカーネルに戻ります（U-Boot は書き換えません）。人の手は要りません。
+4. うまく起動しなければ、watchdog で約 5 分以内に自動で今のカーネル（初めて入れる時は、イメージのカーネル）に戻ります（U-Boot は書き換えません）。人の手は要りません。
 5. 確定した後で戻すには `sudo pomera-kernel rollback`（次の起動から、1 つ前の組。カーネルと U-Boot が組で戻ります）。
 
 U-Boot は試しの起動で試せないため、新しい U-Boot は確定の後の次の起動で初めて動きます。そこで起動しなくなった時は、SD カードを抜けば本体の純正のソフトで起動します。SD カードは、PC で `pomera-kernel/RESTORE.txt` の手順（元の U-Boot を書き戻す）か、取っておいた写しで戻してください。
 
-今のカーネル（DM250 用の Debian イメージに付いてくる物）向けの回避策（Wi-Fi の PIO・watchdog・nftables など）は、FDTP が入れた物です。FDTP を使っていない人は、何も外す必要はありません。
+イメージのカーネル向けの回避策（Wi-Fi の PIO・watchdog・nftables など）は、FDTP が入れた物です。FDTP を使っていない人は、何も外す必要はありません。
 
 ## 上げ方
 
@@ -100,7 +100,7 @@ sudo pomera-kernel rollback   # 1 つ前の組（カーネルと U-Boot）に戻
 | `configs/` | カーネルの設定 |
 | `scripts/` | 本家の版を取ってパッチを当てて組む台本 |
 | `deb/` | .deb を組む台本と、試し起動・確定・戻しの道具（`pomera-kernel`）、hibernate の時に無線のモジュールを外して入れ直す台本 |
-| `dts/` | デバイスツリー。DM250 用 Debian イメージの DTS（`rk3128-pomera-dm250-image.dts`）と、それを直す台本（`mk_leds.sh`・`mk_panel.sh`）、SD カードの RSCE を組む台本（`mk_rsce.sh`） |
+| `dts/` | デバイスツリー。イメージの DTS（`rk3128-pomera-dm250-image.dts`）と、それを直す台本（`mk_leds.sh`・`mk_panel.sh`）、SD カードの RSCE を組む台本（`mk_rsce.sh`） |
 | `uboot/` | SD カードの U-Boot のソース（本家 U-Boot v2026.07 に当てるパッチ・組む台本・組んだ物の sha256） |
 | `apt/` | apt の署名の公開鍵 |
 | `pomera-kernel-setup.sh` | FDTP なしで、鍵と apt の置き場を足して入れる台本 |
@@ -108,7 +108,7 @@ sudo pomera-kernel rollback   # 1 つ前の組（カーネルと U-Boot）に戻
 
 ## デバイスツリーの出どころ
 
-`dts/rk3128-pomera-dm250-image.dts` は、DM250 用の Debian 13 イメージ（https://www.ekesete.net/log/?p=9565）の SD カードの RSCE 領域にある DTB を、DTS に戻した物です。その DTB は、jcs さんの https://github.com/jcs/linux-dm250 の `pomera-dm250.dts` と、本家 Linux の `rk3128.dtsi`（Rockchip）が元です。この形のまま置き、直す所は台本で当てます。
+`dts/rk3128-pomera-dm250-image.dts` は、イメージの SD カードの RSCE 領域にある DTB を、DTS に戻した物です。その DTB は、jcs さんの https://github.com/jcs/linux-dm250 の `pomera-dm250.dts` と、本家 Linux の `rk3128.dtsi`（Rockchip）が元です。この形のまま置き、直す所は台本で当てます。
 
 - `mk_leds.sh`: RK818（電源 IC）の割り込みの結線を実機に合わせ、充電の LED を足す。
 - `mk_panel.sh`: パネルの寸法を 7.0 型（154×86mm）に直す。

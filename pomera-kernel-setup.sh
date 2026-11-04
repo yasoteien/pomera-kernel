@@ -46,8 +46,8 @@ if [ "$mode" = install ]; then
 	say "その方が、Wi-Fi・内蔵メモリ（ポメラの文書を Linux から読み書き）・PD ハブでの充電・時計のずれの直し・HEIC の写真の表示などの設定も一緒にでき、カーネルを替えた後に要らなくなった設定の片付けもしてくれます。" \
 		"That way Wi-Fi, the internal memory (Pomera documents from Linux), PD hub charging, the clock drift fix, HEIC photo viewing and more are set up too, and settings no longer needed after the kernel change are cleaned up."
 	say "" ""
-	say "【免責】試験版です。無保証で、使うのは自己責任です。ポメラの本体・SD カード・データに不具合や損失が起きても、私たち（yasoteien）は責任を負いません。キングジム・DM250 用 Debian イメージの配布元とは関係のない、非公式の物です。入れる前に SD カードの写しを取ってください。戻すには sudo pomera-kernel rollback、起動しなくなったら SD カードを抜けば純正のソフトで起動します。" \
-		"[Disclaimer] Test release: no warranty, use at your own risk. We (yasoteien) are not responsible for any fault or loss of the Pomera, the SD card or data. Unofficial, with nothing to do with King Jim or the distributor of the Debian image. Copy the SD card before installing. To go back: sudo pomera-kernel rollback; if it no longer starts, take out the SD card and the Pomera starts its own software."
+	say "【免責】試験版です。無保証で、使うのは自己責任です。ポメラの本体・SD カード・データに不具合や損失が起きても、私たち（yasoteien）は責任を負いません。キングジム、および ichinomoto 氏が ekesete.net（https://www.ekesete.net/log/?p=9565）で公開している DM250 用 Debian 13 イメージ（以下「イメージ」）とは関係のない、非公式の物です。入れる前に SD カードの写しを取ってください。戻すには sudo pomera-kernel rollback、起動しなくなったら SD カードを抜けば純正のソフトで起動します。" \
+		"[Disclaimer] Test release: no warranty, use at your own risk. We (yasoteien) are not responsible for any fault or loss of the Pomera, the SD card or data. Unofficial, with nothing to do with King Jim or with the DM250 Debian 13 image published by ichinomoto at ekesete.net (https://www.ekesete.net/log/?p=9565) ("the image" below). Copy the SD card before installing. To go back: sudo pomera-kernel rollback; if it no longer starts, take out the SD card and the Pomera starts its own software."
 	# 問いは端末の時だけ（--yes は同意した事になる。端末でない時は、上の文を出して進む）
 	if [ "$yes" = 0 ] && [ -t 0 ]; then
 		printf '%s ' "上の事に同意して、このまま単品で入れますか / Agree to the above and install pomera-kernel alone now? [y/N]"
@@ -108,7 +108,7 @@ if [ -n "$before" ] && [ "$before" = "$after" ]; then
 fi
 say "" ""
 say "再起動すると、次の順で進みます。" "After the reboot:"
-say "  1. まず、今のカーネルで起動します。" "  1. The Pomera first starts with the current kernel."
+say "  1. まず、今のカーネル（初めて入れる時は、イメージのカーネル）で起動します。" "  1. The Pomera first starts with the current kernel (on the first install, the image's kernel)."
 say "  2. 起動の途中で pomera-kernel に移ります。画面が一度消えて、また出ます。" \
 	"  2. During that start it switches to pomera-kernel; the screen goes dark once and comes back."
 say "  3. 正常に起動すれば、約 2 分後に自動で確定し、U-Boot も書き換えます。以後はカーネルと U-Boot の組で起動します。" \

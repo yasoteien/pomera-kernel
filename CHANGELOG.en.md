@@ -2,7 +2,7 @@
 
 This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions are those of the meta package `pomera-kernel` (the release date `YYYY.MM.DD`, with `.1` for a second release in the same week). The Japanese CHANGELOG.md is the authoritative one.
 
-**Test release: no warranty, use at your own risk.** Unofficial, with nothing to do with King Jim or the distributor of the Debian image for the DM250. Make a copy of the SD card before installing (see Disclaimer in the README).
+**Test release: no warranty, use at your own risk.** Unofficial, with nothing to do with King Jim or with the DM250 Debian 13 image published by ichinomoto at ekesete.net (https://www.ekesete.net/log/?p=9565) ("the image" below). Make a copy of the SD card before installing (see Disclaimer in the README).
 
 ## [2026.11.04.3] - 2026-11-04
 
@@ -17,7 +17,7 @@ Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-up
 - Trial boot tool (`pomera-kernel`): the next boot after installation tries the kernel once and confirms it if healthy; if it does not come up, the watchdog brings back the previous kernel within about 5 minutes. `rollback` returns to the previous set (kernel and U-Boot).
 - U-Boot on the SD card (`dm250.8`, mainline U-Boot v2026.07 with patches), written together with the kernel: written at confirmation and taken back by `rollback`.
   - A Pomeranian on the boot screen; a 3-second countdown.
-  - The kernel and device tree are written alternately to two places (slot A and B), and a small table (at 26 and 27 MiB) selects which one boots, so a power cut while writing leaves the previous set or the new one. The kernel of the Debian image for the DM250 (at 12 and 24 MiB) is not changed.
+  - The kernel and device tree are written alternately to two places (slot A and B), and a small table (at 26 and 27 MiB) selects which one boots, so a power cut while writing leaves the previous set or the new one. The image's kernel (at 12 and 24 MiB) is not changed.
   - Four copies of U-Boot; the first one is written last. If the first one is broken, the Pomera starts from the second (tested).
   - The `emmc` command (stop the countdown with a key and type it) starts the built-in (eMMC) firmware.
   - Resumes from a hibernation image when there is one (adds `resume=`).
@@ -27,7 +27,7 @@ Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-up
 
 ### Fixed
 
-Compared with the kernel and U-Boot of the Debian image for the DM250:
+Compared with the image's kernel and U-Boot:
 
 - The Pomera hangs under load on the SD card and Wi-Fi at the same time (power management of the PL330 DMA).
 - On a PD hub it shows "charging" while the battery discharges (USB charger detection and RK818 charge settings).
