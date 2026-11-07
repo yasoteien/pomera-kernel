@@ -109,8 +109,8 @@ fi
 say "" ""
 say "再起動すると、次の順で進みます。" "After the reboot:"
 say "  1. まず、今のカーネル（初めて入れる時は、イメージのカーネル）で起動します。" "  1. The Pomera first starts with the current kernel (on the first install, the image's kernel)."
-say "  2. 起動の途中で pomera-kernel に移ります。画面が一度消えて、また出ます。" \
-	"  2. During that start it switches to pomera-kernel; the screen goes dark once and comes back."
+say "  2. ログインの画面が一度出ますが、ログインせずに 1 分ほど待ってください。画面が流れ出して pomera-kernel（試験版）が起動し、もう一度ログインの画面が出ます（最初の画面でログインしても、切り替わる時に切れます）。" \
+	"  2. A login prompt appears once; do not log in, wait about a minute. The screen scrolls as pomera-kernel (test release) starts, and the login prompt appears again (a login at the first prompt is cut off by the switch)."
 say "  3. 正常に起動すれば、約 2 分後に自動で確定し、U-Boot も書き換えます。以後はカーネルと U-Boot の組で起動します。" \
 	"  3. If it starts normally, it is confirmed by itself about 2 minutes later and U-Boot is rewritten too; from then on the Pomera starts with the kernel and U-Boot as a set."
 say "  4. うまく起動しなければ、約 5 分以内に自動で今のカーネルに戻ります（U-Boot は書き換えません）。" \

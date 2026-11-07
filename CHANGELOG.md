@@ -4,6 +4,15 @@
 
 **試験版です。無保証で、使うのは自己責任です。** キングジム、および ichinomoto 氏が ekesete.net（https://www.ekesete.net/log/?p=9565）で公開されている DM250 用 Debian 13 イメージ（以下「イメージ」）とは関係のない、非公式の物です。入れる前に SD カードの写しを取ってください（README の「免責」）。
 
+## [2026.11.07] - 2026-11-07
+
+上げ方: `sudo apt update && sudo apt upgrade`（`apt-get` なら `dist-upgrade` か `full-upgrade`）。次の起動で新しい版を 1 回だけ試し、正常なら確定します。
+
+### 変更
+
+- 本家 6.18 longterm の 6.18.60 → 6.18.62 に追従（`pomera-kernel-6.18.62-wk20261107`）。SD カード（dw_mmc）の DMA の止め方、Bluetooth、ext4・FAT、TCP・IPv6 の修正を含む（例: CVE-2026-99270、CVE-2026-99076）。
+- DM250 用のパッチ（0001〜0024）、U-Boot（`dm250.8`）、`pomera-kernel-tools`（0.7）は前の版と同じ。
+
 ## [2026.11.04.3] - 2026-11-04
 
 最初の公開です。

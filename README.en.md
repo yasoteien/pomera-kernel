@@ -61,7 +61,7 @@ FDTP users can also install it from FDTP's `./configure` (`sudo fdtp-pomera-setu
 After the reboot:
 
 1. The Pomera first starts with the current kernel (on the first install, the image's kernel).
-2. During that start it switches to pomera-kernel (kexec); the screen goes dark once and comes back.
+2. A login prompt appears once; do not log in, wait about a minute. The screen scrolls as pomera-kernel (test release) starts, and the login prompt appears again (a login at the first prompt is cut off by the switch).
 3. If it starts normally (systemd reaches running), it is confirmed by itself about 2 minutes later: the kernel, its device tree and U-Boot are written to the SD card as a set, and from then on the Pomera starts with the new set (kernel and U-Boot).
    - The kernel and device tree go to the unused one of two places on the card (slot A or B). A small table tells U-Boot which one to boot, so a power cut while writing leaves either the previous set or the new one.
    - The image's kernel (at 12 MiB and 24 MiB on the card) is not changed.

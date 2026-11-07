@@ -4,6 +4,15 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Vers
 
 **Test release: no warranty, use at your own risk.** Unofficial, with nothing to do with King Jim or with the DM250 Debian 13 image published by ichinomoto at ekesete.net (https://www.ekesete.net/log/?p=9565) ("the image" below). Make a copy of the SD card before installing (see Disclaimer in the README).
 
+## [2026.11.07] - 2026-11-07
+
+Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-upgrade` or `full-upgrade`). The next boot tries the new kernel once and confirms it if healthy.
+
+### Changed
+
+- Follow mainline 6.18 longterm from 6.18.60 to 6.18.62 (`pomera-kernel-6.18.62-wk20261107`), including fixes to SD card (dw_mmc) DMA stopping, Bluetooth, ext4 and FAT, TCP and IPv6 (e.g. CVE-2026-99270, CVE-2026-99076).
+- The DM250 patches (0001 to 0024), U-Boot (`dm250.8`) and `pomera-kernel-tools` (0.7) are the same as in the previous release.
+
 ## [2026.11.04.3] - 2026-11-04
 
 First release.
