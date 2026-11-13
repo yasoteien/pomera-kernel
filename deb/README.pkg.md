@@ -34,6 +34,12 @@ U-Boot は試しの起動で試せないため、新しい U-Boot は確定の�
 
 hibernate の前に Wi-Fi・Bluetooth のモジュールを外し、戻った後に入れ直します（`/usr/libexec/pomera-kernel/hibernate-wireless`、systemd-hibernate.service の drop-in から呼ばれます）。`/etc/systemd/system/systemd-hibernate.service.d/` に同じ名前の物があれば、そちらが使われます。
 
+## USB のハブ（0.8 から）
+
+ポメラの USB は、省電力で寝たハブに後から挿した機器（マウス・USB-LAN・スマホなど）を認識できません。このため、USB のハブを寝かせない udev の規則（`/usr/lib/udev/rules.d/60-pomera-usb-hub.rules`）を入れます。ハブが起きている間は、USB の割り込みが毎秒約 8000 回あります（ハブに何かつないでいる時は、規則が無くても同じです）。使わない時は、`/etc/udev/rules.d/60-pomera-usb-hub.rules` に空のファイルを置けば、こちらが止まります。
+
+ポメラは USB に 5V を出さないので、ハブには外から給電してください。
+
 ## 対象
 
 DM250 の日本版だけです。ほかの機種では、パッケージを入れる時に断ります。

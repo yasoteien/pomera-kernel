@@ -1,0 +1,7 @@
+# pomera-kernel-tools: USB のハブを寝かせない（runtime PM を切る）。
+# DM250 の USB（dwc2）は、寝た（autosuspend した）ハブからの起こしの信号（remote wakeup）を受け取れず、
+# ハブが寝た後に挿した機器（マウス・USB-LAN・iPhone など）が認識されない。ハブを起こしておけば認識される
+# （2026-11-08、Genesys 05e3:0610 のハブで確かめた）。ポメラで USB のハブを使う時は外から給電しているので、
+# 電池への影響は小さい。起きている間、dwc2 は SOF の割り込みを毎秒約 8000 回受ける（buffer DMA の作り）。
+# ルートハブもクラス 09 なので同じく起きたままになる。system の suspend・hibernate は妨げない。
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{bDeviceClass}=="09", TEST=="power/control", ATTR{power/control}="on"

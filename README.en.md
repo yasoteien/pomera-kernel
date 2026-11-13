@@ -1,6 +1,9 @@
 # pomera-kernel (Linux kernel for the Pomera DM250)
 
-A Linux kernel for running Debian on the King Jim Pomera DM250 (Japanese model). It is mainline Linux 6.18 longterm with patches for the DM250, shipped as Debian packages (.deb) from an apt repository and rebuilt once a week with the latest stable updates. The Japanese README is the authoritative one.
+A Linux kernel for running Debian on the King Jim Pomera DM250 (Japanese model). It is Linux 6.18 LTS (kernel.org longterm) with patches for the DM250, shipped as Debian packages (.deb) from an apt repository and rebuilt once a week with the latest Linux 6.18 LTS release.
+
+- It follows kernel.org Linux 6.18 LTS. It does not follow the kernel updates of ichinomoto's image (it is built independently of the image's kernel).
+- It is also separate from the kernel Debian 13 ships (the 6.12 series). The rest of Debian 13 keeps being updated by Debian's apt as before. The Japanese README is the authoritative one.
 
 - Only the Japanese DM250. The US model (DM250US) and other models are refused by the package.
 - For Debian booted from the SD card. The internal eMMC is not written.
@@ -17,6 +20,11 @@ A Linux kernel for running Debian on the King Jim Pomera DM250 (Japanese model).
 ## Install
 
 **FDTP (https://github.com/yasoteien/fdtp) makes this easier.** FDTP's `./configure` (`sudo fdtp-pomera-setup` for the .deb version) can also install pomera-kernel, and sets up Wi-Fi, the internal memory (reading and writing Pomera documents from Linux), charging through a PD hub, the clock drift fix, HEIC photo viewing and more at the same time. It also cleans up settings that are no longer needed after the kernel changes.
+
+> **About the network while installing (only if you can):** with the kernel that came with the image, fetching something large over Wi-Fi at full speed can freeze the Pomera (a bug in the DMA shared by the SD card and Wi-Fi; pomera-kernel fixes it). The kernel .deb is about 17 MB, so either of these is safer:
+>
+> - **Use a wired USB-LAN adapter or USB tethering from a phone.** USB traffic does not go through that DMA. The Pomera's Linux has drivers for USB-LAN chips such as Realtek RTL8152, RTL8153 and RTL8156, ASIX AX88179 and AX88179A, and Microchip LAN7800, and for iPhone (install `usbmuxd`) and Android USB tethering. The Pomera does not supply 5 V on its USB port, so connect through an externally powered USB hub (PD hubs with HDMI may not be detected). When connected, it is used in preference to Wi-Fi.
+> - **Slow down apt's download.** Run step 3's `apt install` as `sudo apt -o Acquire::https::Dl-Limit=200 install pomera-kernel`; the download is limited to about 200 KB/s (it takes a minute or two longer).
 
 Without FDTP, the following commands install it (on the Debian SD card).
 
@@ -91,6 +99,18 @@ sudo pomera-kernel rollback   # back to the previous set (kernel and U-Boot) fro
 ```
 
 `apt autoremove` removes old versions but keeps the current and the previous one.
+
+## About USB 5 V output (VBUS)
+
+The 20261113 release of ichinomoto's image added `sudo vbus_ctl on`, which supplies 5 V from the Pomera's USB-C port to the connected device (using the boost converter and OTG_SWITCH of the RK818 power IC). pomera-kernel does not include this feature for now, for these reasons:
+
+- **It can collide with an external power source.** While the output is on, the Pomera itself drives USB 5 V (VBUS). If a charger, a PC or a powered hub is connected afterwards, the power IC cannot tell the two apart, and two 5 V sources may fight and damage the device. The image's download page gives the same warning. The software stops the output in several cases (a time-limited lease, stop on unplug), but this is not electrical protection.
+- **It does not fit charging through a powered hub.** pomera-kernel is mainly tested with a powered hub (a hub with PD charging) that charges the Pomera while USB devices are in use. That setup does not need 5 V output, and plugging power into the hub while the output is on causes exactly the collision above.
+- **There is no software current monitoring.** What happens when a device draws too much current is left to the power IC's own protection (we have not tested how it behaves).
+
+Connect devices that need power (USB Ethernet, phones, etc.) through a powered hub. We will reconsider this if a reliable way to stop the output before external power is connected is confirmed.
+
+The problem where devices plugged into a hub later are not recognized is unrelated to this 5 V output (the Pomera's USB cannot wake a hub that has gone into power saving). pomera-kernel-tools 0.8 fixes it by keeping hubs awake.
 
 ## Contents
 

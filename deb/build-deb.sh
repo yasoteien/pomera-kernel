@@ -93,7 +93,8 @@ install -D -m 0644 tools/systemd/pomera-kernel-confirm.service "$T/usr/lib/syste
 install -D -m 0644 tools/systemd/pomera-kernel-confirm.timer "$T/usr/lib/systemd/system/pomera-kernel-confirm.timer"
 install -D -m 0644 tools/systemd/systemd-hibernate.service.d/60-pomera-wireless.conf \
 	"$T/usr/lib/systemd/system/systemd-hibernate.service.d/60-pomera-wireless.conf"
-docs "$T" $P "$TV" "試し起動の仕掛けと hibernate の無線の仕掛け" changelog.gz
+install -D -m 0644 tools/udev/60-pomera-usb-hub.rules "$T/usr/lib/udev/rules.d/60-pomera-usb-hub.rules"   # 0.8 から。ハブを寝かせない
+docs "$T" $P "$TV" "試し起動の仕掛け、hibernate の無線の仕掛け、USB のハブを寝かせない udev の規則" changelog.gz
 install -m 0644 README.pkg.md "$T/usr/share/doc/$P/README.md"   # 利用者向け（README.md は作業の記録で、パッケージには入れない）
 install -d "$T/DEBIAN"
 cat > "$T/DEBIAN/control" <<EOF
@@ -114,7 +115,9 @@ Description: Pomera DM250 kernel trial-boot tools
  tells U-Boot which slot to boot, so a power cut while writing leaves either
  the previous or the new set. Otherwise the watchdog resets the board and the
  previous set boots again.
- Also unloads the Wi-Fi and Bluetooth modules around hibernation.
+ Also unloads the Wi-Fi and Bluetooth modules around hibernation, and keeps
+ USB hubs from autosuspending (the DM250's USB controller misses the remote
+ wakeup of a suspended hub, so devices plugged in later were not detected).
  .
  Unofficial test release with no warranty; use at your own risk and copy
  the SD card first. It has nothing to do with King Jim or the distributor
@@ -129,6 +132,11 @@ if [ "$1" = configure ]; then
 	pomera-kernel keep || true
 	if [ -d /run/systemd/system ]; then
 		deb-systemd-invoke daemon-reload >/dev/null 2>&1 || true
+	fi
+	# 0.8: 今つながっているハブにも、USB のハブを寝かせない規則を当てる（次に挿すまで待たない）
+	if command -v udevadm >/dev/null 2>&1; then
+		udevadm control --reload-rules >/dev/null 2>&1 || true
+		udevadm trigger --action=add --subsystem-match=usb --attr-match=bDeviceClass=09 >/dev/null 2>&1 || true
 	fi
 fi
 exit 0
