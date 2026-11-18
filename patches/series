@@ -22,3 +22,15 @@
 0022-clk-rk3128-restore-clksel-after-hibernation.patch
 0023-rk818-hub-limit-checks.patch
 0024-rk818-full-on-charge-termination.patch
+0025-rk818-unbind-order-ilim.patch
+0026-tc3589x-drop-debug-key-state.patch
+0027-tc3589x-release-on-read-error.patch
+0028-rk818-no-sleep-near-empty.patch
+0029-rk818-input-checks.patch
+0030-dw-wdt-ping-during-hibernation.patch
+0031-rk818-pause-charging-when-hot.patch
+0032-rk818-awake-after-vb-low.patch
+0033-rk818-charge-voltage-from-dt.patch
+0034-rk818-vb-low-until-charged.patch
+0035-rk818-ts1-reading-overheat.patch
+0036-rk818-hot-threshold-from-monitor.patch

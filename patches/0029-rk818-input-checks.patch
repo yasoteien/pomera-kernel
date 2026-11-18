@@ -1,0 +1,92 @@
+From 4880251f700f1a21d2585388d73718a51420609f Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:55:15 +0900
+Subject: [PATCH 29/30] power: supply: rk818: Check the calibration, charge
+ voltage and test threshold
+
+- Reject a voltage calibration span below 64 counts: volt_k * raw then
+  overflowed an int.
+- The charger is always set to 4.2 V. Use 4.2 V to judge "full" also
+  when the battery node gives another charge voltage, with a warning.
+- lowv_test_uv at or below the battery minimum disabled the low battery
+  shutdown. Ignore such a value with a warning.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/power/supply/rk818_charger.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index 793d91543..729cff467 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -52,6 +52,7 @@
+ #define RK818_CHRG_CTRL_REG3		0xa5
+ /* Charger enabled, 4.2 V */
+ #define RK818_CHRG_CTRL1_BASE		0xb0
++#define RK818_CV_UV			4200000
+ /* Termination 100 mA, trickle timer 60 min, CC/CV timer 12 h */
+ #define RK818_CHRG_CTRL2_VAL		0x0d
+ /* Digital termination, CC/CV timer on */
+@@ -137,6 +138,9 @@
+  */
+ static int lowv_test_uv;
+ module_param(lowv_test_uv, int, 0444);
++
++/* See rk818_read_calibration(): keeps volt_k * 65535 within an int */
++#define RK818_VCALIB_MIN_SPAN		64
+ MODULE_PARM_DESC(lowv_test_uv, "Low battery shutdown voltage for testing (uV, 0: battery minimum)");
+ 
+ /*
+@@ -1160,7 +1164,7 @@ static void rk818_monitor_work(struct work_struct *work)
+ 		ch->neg_cnt = false;
+ 		ch->dead = true;
+ 		ret = 0;
+-		if (lowv_test_uv <= 0) {
++		if (ch->shutdown_uv == ch->vmin_uv) {
+ 			ret = rk818_write_gascnt(ch, 0);
+ 			if (!ret)
+ 				ret = rk818_save_gauge(ch, 0, ch->design_uah);
+@@ -1408,7 +1412,11 @@ static int rk818_read_calibration(struct rk818_charger *ch)
+ 
+ 	v0 = be16_to_cpu(raw0);
+ 	v1 = be16_to_cpu(raw1);
+-	if (v0 >= v1)
++	/*
++	 * A span too small would overflow volt_k * raw below; any real
++	 * reading of the 1.2 V between 3.0 V and 4.2 V is far wider.
++	 */
++	if (v0 >= v1 || v1 - v0 < RK818_VCALIB_MIN_SPAN)
+ 		return -EINVAL;
+ 
+ 	/* VCALIB0 and VCALIB1 are the readings at 3.0 V and 4.2 V */
+@@ -1442,6 +1450,12 @@ static int rk818_read_battery(struct rk818_charger *ch)
+ 	ch->ir_uohm = max(info->factory_internal_resistance_uohm, 0);
+ 	ch->cc_ua = info->constant_charge_current_max_ua;
+ 	ch->cv_uv = info->constant_charge_voltage_max_uv;
++	if (ch->cv_uv != RK818_CV_UV) {
++		/* The charger is always set to 4.2 V: judge "full" by that */
++		dev_warn(ch->dev, "charge voltage %d uV not supported: using %d uV\n",
++			 ch->cv_uv, RK818_CV_UV);
++		ch->cv_uv = RK818_CV_UV;
++	}
+ 
+ 	table = power_supply_find_ocv2cap_table(info, RK818_OCV_TEMP_C, &len);
+ 	if (table) {
+@@ -1578,9 +1592,12 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 		return ret;
+ 
+ 	ch->shutdown_uv = ch->vmin_uv;
+-	if (lowv_test_uv > 0) {
++	if (lowv_test_uv > ch->vmin_uv) {
+ 		ch->shutdown_uv = lowv_test_uv;
+ 		dev_warn(dev, "testing: low battery shutdown at %d uV\n", lowv_test_uv);
++	} else if (lowv_test_uv) {
++		dev_warn(dev, "lowv_test_uv %d ignored: not above %d uV\n",
++			 lowv_test_uv, ch->vmin_uv);
+ 	}
+ 
+ 	ret = rk818_charger_init(ch);
+-- 
+2.47.3
+

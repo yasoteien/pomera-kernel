@@ -112,6 +112,14 @@ Connect devices that need power (USB Ethernet, phones, etc.) through a powered h
 
 The problem where devices plugged into a hub later are not recognized is unrelated to this 5 V output (the Pomera's USB cannot wake a hub that has gone into power saving). pomera-kernel-tools 0.8 fixes it by keeping hubs awake.
 
+## Charging a nearly empty battery
+
+When the battery is nearly empty (around 3.4 V), charge it with the supplied AC adapter (or a powered hub).
+
+On a weak supply such as a PC's USB port, the Pomera can use more than the supply gives, and the battery keeps going down. When it reaches the minimum, pomera-kernel shuts the Pomera down in the normal way, but with power connected the Pomera starts again at once, and it may keep shutting down and starting again. The battery can go further down each time, until the power IC's own protection (about 2.7 V) cuts the power. There is not yet a way (in U-Boot) to wait for the battery to charge before starting.
+
+While the battery is below about 3.5 V, the Pomera does not sleep when the lid is closed, even on power, so that it does not run the battery flat while asleep.
+
 ## Contents
 
 | Path | What |

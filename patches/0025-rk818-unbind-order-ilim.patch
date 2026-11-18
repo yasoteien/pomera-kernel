@@ -1,0 +1,68 @@
+From 2a1ee520bff8d56cc0eb0cafc99dc4494986b3e5 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:55:14 +0900
+Subject: [PATCH 25/30] power: supply: rk818: Cancel the monitor first and
+ start at 450 mA
+
+On unbind the delayed works were cancelled in the reverse order of
+registration: the monitor, which queues the hub, LED and power-off
+works, was cancelled last, and could queue the hub or LED work again
+after it had been cancelled and the driver data freed. Register the
+monitor after the works it queues, so that it is cancelled first.
+
+The MFD core starts the USB input limit at 2 A, and a probe that failed
+before rk818_charger_init() left it there, also on a computer port.
+Set 450 mA at the start of the probe.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/power/supply/rk818_charger.c | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index a09d4df45..1c0a33399 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -1513,6 +1513,15 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 	ch->regmap = rk808->regmap;
+ 	platform_set_drvdata(pdev, ch);
+ 
++	/*
++	 * The MFD core starts the input limit at 2 A. Drop it to 450 mA
++	 * first, so that a probe that fails below leaves a USB port safe.
++	 * rk818_charger_init() sets the same value again.
++	 */
++	ret = rk818_update(ch->regmap, RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK, 0);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to set the input limit\n");
++
+ 	ch->np = of_get_child_by_name(dev->parent->of_node, "charger");
+ 	if (!ch->np)
+ 		return -ENODEV;
+@@ -1591,9 +1600,6 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = devm_delayed_work_autocancel(dev, &ch->work, rk818_monitor_work);
+-	if (ret)
+-		return ret;
+ 	ret = devm_delayed_work_autocancel(dev, &ch->hub_work, rk818_hub_work);
+ 	if (ret)
+ 		return ret;
+@@ -1601,6 +1607,13 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_delayed_work_autocancel(dev, &ch->off_work, rk818_off_work);
++	if (ret)
++		return ret;
++	/*
++	 * Registered after the works it queues, so that on unbind it is
++	 * cancelled first and cannot queue them again once they are gone.
++	 */
++	ret = devm_delayed_work_autocancel(dev, &ch->work, rk818_monitor_work);
+ 	if (ret)
+ 		return ret;
+ 
+-- 
+2.47.3
+

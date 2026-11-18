@@ -1,0 +1,83 @@
+From 2b98889dbc5fe5bb651befc9b75615132c91b57b Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 18:11:28 +0900
+Subject: [PATCH 32/33] power: supply: rk818: Stay awake on battery after VB_LO
+
+The suspend check of the previous change used the voltage at the
+moment of suspend. After the PMIC raises VB_LO (3.5 V) under load, the
+voltage comes back up by about 0.1 V when the load drops, so a lid
+closed then could pass the check, and the PMIC may not raise VB_LO again
+below it. Remember VB_LO on battery until power is plugged in, and while
+it is set refuse suspend to idle or RAM below the shutdown voltage plus
+300 mV.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/power/supply/rk818_charger.c | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index 97aa88a21..e6a944bc0 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -119,6 +119,12 @@
+  * system suspended there would discharge the battery past the minimum.
+  */
+ #define RK818_SUSPEND_MARGIN_UV		150000
++/*
++ * After a VB_LO interrupt on battery, no suspend below the shutdown
++ * voltage plus this, until power is plugged in: the voltage comes back
++ * up when the load drops, and the PMIC may not raise VB_LO again.
++ */
++#define RK818_VB_LOW_MARGIN_UV		300000
+ /*
+  * After a low battery the orderly power-off gets this long; then the driver
+  * switches the PMIC off itself, after emergency_sync() and with one retry.
+@@ -358,6 +364,8 @@ struct rk818_charger {
+ 	int shutdown_uv;
+ 	/* Set once the low battery shutdown has started */
+ 	bool dead;
++	/* VB_LO was raised on battery; cleared when plugged in */
++	bool vb_low;
+ 	struct delayed_work off_work;
+ 
+ 	/* The USB input limit, under ilim_lock */
+@@ -685,6 +693,8 @@ static int rk818_gauge_update(struct rk818_charger *ch)
+ 	if (ret)
+ 		return ret;
+ 	plugged = mon & RK818_PLUG_IN_STS;
++	if (plugged)
++		WRITE_ONCE(ch->vb_low, false);
+ 
+ 	if (rk818_low_battery(ch, uv, ua, plugged)) {
+ 		if (!ch->low_volt) {
+@@ -1337,7 +1347,11 @@ static irqreturn_t rk818_plug_irq(int irq, void *data)
+ static irqreturn_t rk818_vb_low_irq(int irq, void *data)
+ {
+ 	struct rk818_charger *ch = data;
++	unsigned int mon;
+ 
++	if (!regmap_read(ch->regmap, RK808_VB_MON_REG, &mon) &&
++	    !(mon & RK818_PLUG_IN_STS))
++		WRITE_ONCE(ch->vb_low, true);
+ 	mod_delayed_work(system_freezable_wq, &ch->work, 0);
+ 	return IRQ_HANDLED;
+ }
+@@ -1759,9 +1773,12 @@ static int rk818_charger_suspend_sleep(struct device *dev)
+ 	if (!ch->dead && !rk818_read_voltage(ch, &uv) &&
+ 	    !regmap_read(ch->regmap, RK808_VB_MON_REG, &mon) &&
+ 	    !(mon & RK818_PLUG_IN_STS) &&
+-	    uv < ch->shutdown_uv + RK818_SUSPEND_MARGIN_UV) {
++	    (uv < ch->shutdown_uv + RK818_SUSPEND_MARGIN_UV ||
++	     (READ_ONCE(ch->vb_low) &&
++	      uv < ch->shutdown_uv + RK818_VB_LOW_MARGIN_UV))) {
+ 		mutex_unlock(&ch->lock);
+-		dev_warn(dev, "battery nearly empty (%d uV): not suspending\n", uv);
++		dev_warn(dev, "battery nearly empty (%d uV%s): not suspending\n",
++			 uv, READ_ONCE(ch->vb_low) ? ", after VB_LO" : "");
+ 		return -EBUSY;
+ 	}
+ 	mutex_unlock(&ch->lock);
+-- 
+2.47.3
+

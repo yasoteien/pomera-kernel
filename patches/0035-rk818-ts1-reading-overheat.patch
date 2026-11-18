@@ -1,0 +1,90 @@
+From 0e28a59264e7d4c5f144f38c67ff21a2c72d4d3b Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 18:31:13 +0900
+Subject: [PATCH 35/35] power: supply: rk818: Hot threshold only with a TS1
+ reading; report overheat
+
+Right after the TS1 ADC is turned on (after a PMIC reset) its reading
+may still be 0, which the PMIC would take as a hot battery and pause
+charging. Wait up to 30 ms for a reading and leave the threshold off if
+there is none. While the charger pauses on battery temperature, report
+the status as not charging and the health as overheat, as only the hot
+threshold is set.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/power/supply/rk818_charger.c | 24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index d9b67965a..0efb75f82 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -74,6 +74,7 @@
+ #define RK818_CHRG_CTRL3_VAL		0x26
+ 
+ #define RK818_BAT_HTS_TS1_REG		0xa8
++#define RK818_TS1_ADC_REGH		0xbe
+ #define RK818_TS_CTRL_REG		0xac
+ #define RK818_ADC_CTRL_REG		0xad
+ #define RK818_ADC_TS1_EN		BIT(5)
+@@ -802,6 +803,7 @@ static int rk818_bat_status(struct rk818_charger *ch, int *status)
+ 
+ 	switch (FIELD_GET(RK818_SUP_STS_CHG_STS, sup)) {
+ 	case RK818_CHG_OFF:
++	case RK818_CHG_BAT_TEMP:
+ 		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
+ 		break;
+ 	case RK818_CHG_TERM:
+@@ -854,7 +856,8 @@ static int rk818_bat_health(struct rk818_charger *ch, int *health)
+ 		*health = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
+ 		break;
+ 	case RK818_CHG_BAT_TEMP:
+-		*health = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++		/* Only the hot threshold is set (0x1c) */
++		*health = POWER_SUPPLY_HEALTH_OVERHEAT;
+ 		break;
+ 	case RK818_CHG_TIMER:
+ 		*health = POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE;
+@@ -1286,7 +1289,8 @@ static int rk818_cc_sel(int ua)
+ /* Also run on resume. The input limit starts at 450 mA. */
+ static int rk818_charger_init(struct rk818_charger *ch)
+ {
+-	int sel, ret;
++	__be16 ts1 = 0;
++	int sel, ret, i;
+ 
+ 	sel = rk818_cc_sel(ch->cc_ua);
+ 	if (sel < 0)
+@@ -1322,14 +1326,26 @@ static int rk818_charger_init(struct rk818_charger *ch)
+ 
+ 	/*
+ 	 * The TS1 ADC first: with a threshold set and no reading the
+-	 * charger could pause. Both reset to off with the PMIC.
++	 * charger could pause. Both reset to off with the PMIC. If the ADC
++	 * has not given a reading yet (0), leave the threshold off.
+ 	 */
+ 	ret = rk818_update(ch->regmap, RK818_ADC_CTRL_REG, RK818_ADC_TS1_EN,
+ 			   RK818_ADC_TS1_EN);
+ 	if (ret)
+ 		return ret;
++	for (i = 0; i < 3; i++) {
++		ret = regmap_bulk_read(ch->regmap, RK818_TS1_ADC_REGH, &ts1,
++				       sizeof(ts1));
++		if (ret)
++			return ret;
++		if (be16_to_cpu(ts1))
++			break;
++		msleep(10);
++	}
++	if (!be16_to_cpu(ts1))
++		dev_warn(ch->dev, "no battery temperature reading: hot battery check off\n");
+ 	ret = rk818_update(ch->regmap, RK818_BAT_HTS_TS1_REG, 0xff,
+-			   RK818_BAT_HTS_TS1_VAL);
++			   be16_to_cpu(ts1) ? RK818_BAT_HTS_TS1_VAL : 0);
+ 	if (ret)
+ 		return ret;
+ 
+-- 
+2.47.3
+

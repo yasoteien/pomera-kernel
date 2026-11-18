@@ -1,0 +1,44 @@
+From 5997940bcc1dc66620d64c2fb028931c69d1395a Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:55:14 +0900
+Subject: [PATCH 26/30] Input: tc3589x-keypad: Drop the debug_key_state
+ parameter
+
+When set, it logged the key code registers of every key press to the
+kernel log, which ordinary users can read, so typed passwords could be
+read back. It was only used while bringing up the DM250 keyboard.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/input/keyboard/tc3589x-keypad.c | 8 --------
+ 1 file changed, 8 deletions(-)
+
+diff --git a/drivers/input/keyboard/tc3589x-keypad.c b/drivers/input/keyboard/tc3589x-keypad.c
+index f42e81ce8..8ba52fcd3 100644
+--- a/drivers/input/keyboard/tc3589x-keypad.c
++++ b/drivers/input/keyboard/tc3589x-keypad.c
+@@ -77,10 +77,6 @@
+ #define TC3589x_KBDCODE_NUM	4
+ #define KP_KBDCODE_MULTIKEY	0x80
+ 
+-static bool debug_key_state;
+-module_param(debug_key_state, bool, 0644);
+-MODULE_PARM_DESC(debug_key_state, "Log the key code registers on each interrupt");
+-
+ /**
+  * struct tc3589x_keypad_platform_data - platform specific keypad data
+  * @keymap_data:        matrix scan code table for keycodes
+@@ -251,10 +247,6 @@ static void tc3589x_keypad_read_state(struct tc_keypad *keypad)
+ 		kbd_code[i] = ret;
+ 	}
+ 
+-	if (debug_key_state)
+-		dev_info(tc3589x->dev, "DM250 KBDCODE: %*ph\n",
+-			 TC3589x_KBDCODE_NUM, kbd_code);
+-
+ 	for (i = 0; i < TC3589x_KBDCODE_NUM; i++) {
+ 		if ((kbd_code[i] & KP_NO_VALID_KEY_MASK) == KP_NO_VALID_KEY_MASK)
+ 			break;
+-- 
+2.47.3
+

@@ -4,6 +4,32 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Vers
 
 **Test release: no warranty, use at your own risk.** Unofficial, with nothing to do with King Jim or with the DM250 Debian 13 image published by ichinomoto at ekesete.net (https://www.ekesete.net/log/?p=9565) ("the image" below). Make a copy of the SD card before installing (see Disclaimer in the README).
 
+## [2026.11.18] - 2026-11-18
+
+Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-upgrade` or `full-upgrade`). The next boot tries the new kernel once and confirms it if healthy.
+
+### Changed
+
+- Follow Linux 6.18 LTS from 6.18.63 to 6.18.64 (`pomera-kernel-6.18.64-wk20261118`), including fixes to 32-bit mm (truncation beyond 4 GiB, an overflow in writeback), FAT, IPv6, Bluetooth L2CAP and Wi-Fi (cfg80211, mac80211, brcmfmac) (e.g. CVE-2026-99272, CVE-2026-99275, which matter only when mounting SMB shares).
+- New DM250 patches 0025 to 0036: findings of a review by Claude Mythos, a model for security work, checked on the device and fixed (see Added and Fixed below).
+- The README now has "Charging a nearly empty battery" (a known issue).
+- U-Boot (`dm250.8`) and `pomera-kernel-tools` (0.8) are the same as in the previous release.
+
+### Added
+
+- Charging pauses while the battery is hot (about 55 C or more) and goes on by itself when it cools, using the battery's temperature sensor (shown as not charging, overheat).
+- With the battery nearly empty (on battery below about 3.55 V, or below 3.7 V after it once fell below 3.5 V, or while below 3.5 V), the Pomera does not sleep when the lid is closed, so that it does not run the battery flat while asleep and the normal shutdown on an empty battery can run. Hibernation still works.
+
+### Fixed
+
+- The system could be reset by the watchdog while writing the hibernation image, losing it (on a boot where the watchdog runs, such as the boot after trying a new kernel).
+- After the battery recovered and the forced power-off was cancelled, the battery was no longer watched.
+- A key held at the moment a keyboard read failed could stay pressed and repeat.
+- With a debug setting (`debug_key_state`) on, typed keys went to the kernel log (off by default; the setting is removed).
+- If the charger driver failed partway through starting, the USB input limit was left at 2 A, also on a PC's USB port.
+- Unbinding the charger driver (root only) could use freed memory.
+- A battery node with a charge voltage below 4.2 V was still charged at 4.2 V (the DM250 uses 4.2 V, so no effect). Checks for abnormal calibration and test values were added.
+
 ## [2026.11.13] - 2026-11-13
 
 Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-upgrade` or `full-upgrade`). The next boot tries the new kernel once and confirms it if healthy.
