@@ -1,5 +1,11 @@
 # pomera-kernel（ポメラ DM250 の Linux カーネル）
 
+> **この branch（`linux-7.3`）は開発中です。使わないでください。**
+> 次の本線にする Linux 7.3 への載せ替えを進めている branch です。パッチは 6.18 の物を移した `v73-00xx`（番号は 6.18 と同じ）と、7.3 で足した `v73-1xxx` です。設定（`configs/dm250.config`）は 7.3 用で、MGLRU（`CONFIG_LRU_GEN`）を入れています。
+> - 2026 年の Linux LTS は 7.3 になる見込みです（正式な指定はまだ）。Debian 14（forky）も 7.3 を使う見込みのため、Debian 14 の公開に合わせて、この branch を main に取り込み、apt の `stable` で 7.3 を配る予定です。Debian 13 のままでも 7.3 は動きます。
+> - その日をもって 6.18 系の保守は終えます（最後の状態はタグで残します）。
+> - それまでの公開版は main の 6.18 系です。apt で入る物も 6.18 系のままです。
+
 キングジムのポメラ DM250（日本版）で Debian を動かすための Linux カーネルです。Linux 6.18 LTS（kernel.org の longterm）に DM250 用のパッチを当てて組み、Debian のパッケージ（.deb）と apt の置き場で配ります。毎週 1 回、Linux 6.18 LTS の最新の版を取り込んで出し直します。
 
 - 追従する先は kernel.org の Linux 6.18 LTS です。ichinomoto 氏のイメージのカーネルの更新には追従しません（イメージのカーネルとは別に、独自に組んでいます）。

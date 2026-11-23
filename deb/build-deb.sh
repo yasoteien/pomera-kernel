@@ -32,11 +32,11 @@ else
 fi
 PV=$V${REV:++$REV}   # パッケージの版
 MV=${POMERA_META_VER:-$(TZ=Asia/Tokyo date +%Y.%m.%d)}   # メタの版
-[[ "$MV" =~ ^20[0-9]{2}\.[01][0-9]\.[0-3][0-9](\.[0-9]+)?$ ]] || { echo "メタの版は YYYY.MM.DD[.N]: $MV" >&2; exit 1; }
+[[ "$MV" =~ ^20[0-9]{2}\.[01][0-9]\.[0-3][0-9](\.[0-9]+)?(\+v73)?$ ]] || { echo "メタの版は YYYY.MM.DD[.N][+v73]: $MV" >&2; exit 1; }
 [[ -z "$REV" || "$REV" =~ ^[0-9]+$ ]] || { echo "組み直しの番号は数字: $REV" >&2; exit 1; }
 cd "$(dirname "$0")"
 TOP=$PWD
-[[ "$V" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]] || { echo "版の名前が違う: $V" >&2; exit 1; }
+[[ "$V" =~ ^(6\.18|7\.3)\.[0-9]+-[a-z0-9]+$ ]] || { echo "版の名前が違う: $V" >&2; exit 1; }
 [ $META_ONLY = 1 ] || {
 [ "$(stat -c %s "$KRNL")" = 12582912 ] && [ "$(head -c 4 "$KRNL")" = KRNL ] || { echo "$KRNL が 12MiB の KRNL でない" >&2; exit 1; }
 [ "$(stat -c %s "$RSCE")" = 1048576 ] && [ "$(head -c 4 "$RSCE")" = RSCE ] || { echo "$RSCE が 1MiB の RSCE でない" >&2; exit 1; }

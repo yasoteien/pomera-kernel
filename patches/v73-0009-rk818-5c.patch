@@ -1,0 +1,138 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] power: supply: rk818: Set up the charger
+
+Write the charger settings as well. The fuel gauge is still only read.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index c3eea003770f..6b520655067a 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -7,8 +7,8 @@
+  * vendor kernel of that device, so that both kernels can be booted on
+  * one machine without upsetting each other's state of charge.
+  *
+- * Stage 5b: only the USB input current limit (USB_CTRL_REG bits 3:0) is
+- * written.
++ * Stage 5c: the USB input current limit and the charger settings are
++ * written. The fuel gauge is only read.
+  */
+ 
+ #include <linux/bitfield.h>
+@@ -29,9 +29,24 @@
+ 
+ #define RK818_SUP_STS_BAT_EXS		BIT(7)
+ #define RK818_SUP_STS_CHG_STS		GENMASK(6, 4)
++#define RK818_SUP_STS_ILIM_MASK		GENMASK(3, 2)
++#define RK818_SUP_STS_ILIM_EN		BIT(2)
+ 
++#define RK818_CHRG_CT_EN		BIT(7)
+ #define RK818_ILIM_SEL_MASK		GENMASK(3, 0)
+ 
++#define RK818_HOTDIE_TEMP_MASK		GENMASK(3, 2)	/* RK808_THERMAL_REG */
++
++#define RK818_CHRG_CTRL_REG1		0xa3
++#define RK818_CHRG_CTRL_REG2		0xa4
++#define RK818_CHRG_CTRL_REG3		0xa5
++/* Charger enabled, 4.2 V */
++#define RK818_CHRG_CTRL1_BASE		0xb0
++/* Termination 100 mA, trickle timer 60 min, CC/CV timer 12 h */
++#define RK818_CHRG_CTRL2_VAL		0x0d
++/* Digital termination, CC/CV timer on */
++#define RK818_CHRG_CTRL3_VAL		0x26
++
+ #define RK818_BAT_CUR_AVG_REGH		0xbc
+ #define RK818_BAT_CUR_AVG_REGL		0xbd
+ #define RK818_BAT_VOL_REGH		0xc4
+@@ -54,7 +69,12 @@ static const struct {
+ 	u8 reg;
+ 	u8 mask;
+ } rk818_writable[] = {
+-	{ RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK },
++	{ RK818_USB_CTRL_REG, RK818_CHRG_CT_EN | RK818_ILIM_SEL_MASK },
++	{ RK808_THERMAL_REG, RK818_HOTDIE_TEMP_MASK },
++	{ RK818_SUP_STS_REG, RK818_SUP_STS_ILIM_MASK },
++	{ RK818_CHRG_CTRL_REG1, 0xff },
++	{ RK818_CHRG_CTRL_REG2, 0xff },
++	{ RK818_CHRG_CTRL_REG3, 0xff },
+ };
+ 
+ static int rk818_update(struct regmap *map, unsigned int reg,
+@@ -532,6 +552,53 @@ static void rk818_monitor_work(struct work_struct *work)
+ 			   msecs_to_jiffies(RK818_MONITOR_MS));
+ }
+ 
++/* Charge current: 1.0 A to 3.0 A in steps of 0.2 A */
++static int rk818_cc_sel(int ua)
++{
++	if (ua < 1000000 || ua > 3000000 || (ua - 1000000) % 200000)
++		return -EINVAL;
++	return (ua - 1000000) / 200000;
++}
++
++/* Also run on resume. The input limit starts at 450 mA. */
++static int rk818_charger_init(struct rk818_charger *ch)
++{
++	int sel, ret;
++
++	sel = rk818_cc_sel(ch->cc_ua);
++	if (sel < 0)
++		return sel;
++
++	ret = rk818_update(ch->regmap, RK818_USB_CTRL_REG,
++			   RK818_CHRG_CT_EN | RK818_ILIM_SEL_MASK, RK818_CHRG_CT_EN);
++	if (ret)
++		return ret;
++
++	ret = rk818_update(ch->regmap, RK808_THERMAL_REG, RK818_HOTDIE_TEMP_MASK,
++			   FIELD_PREP(RK818_HOTDIE_TEMP_MASK,
++				      (ch->hotdie_mc - 85000) / 10000));
++	if (ret)
++		return ret;
++
++	ret = rk818_update(ch->regmap, RK818_CHRG_CTRL_REG1, 0xff,
++			   RK818_CHRG_CTRL1_BASE | sel);
++	if (ret)
++		return ret;
++
++	ret = rk818_update(ch->regmap, RK818_CHRG_CTRL_REG2, 0xff,
++			   RK818_CHRG_CTRL2_VAL);
++	if (ret)
++		return ret;
++
++	ret = rk818_update(ch->regmap, RK818_CHRG_CTRL_REG3, 0xff,
++			   RK818_CHRG_CTRL3_VAL);
++	if (ret)
++		return ret;
++
++	return rk818_update(ch->regmap, RK818_SUP_STS_REG, RK818_SUP_STS_ILIM_MASK,
++			    RK818_SUP_STS_ILIM_EN);
++}
++
+ /* Back to 450 mA on every plug event until the monitor has looked */
+ static irqreturn_t rk818_plug_irq(int irq, void *data)
+ {
+@@ -779,6 +846,10 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	ret = rk818_charger_init(ch);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to initialize charger\n");
++
+ 	ch->ac = devm_power_supply_register(dev, &rk818_ac_desc, &cfg);
+ 	if (IS_ERR(ch->ac))
+ 		return dev_err_probe(dev, PTR_ERR(ch->ac), "failed to register AC supply\n");
+@@ -830,6 +901,11 @@ static int rk818_charger_suspend(struct device *dev)
+ static int rk818_charger_resume(struct device *dev)
+ {
+ 	struct rk818_charger *ch = dev_get_drvdata(dev);
++	int ret;
++
++	ret = rk818_charger_init(ch);
++	if (ret)
++		return ret;
+ 
+ 	mod_delayed_work(system_freezable_wq, &ch->work, 0);
+ 	return 0;

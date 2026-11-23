@@ -1,0 +1,184 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] clk: rockchip: rk3128: Restore CLKSEL_CON after a hibernation image is restored
+
+After a hibernation image is restored, CLKSEL_CON holds what the boot
+loader and the loading kernel left there, while the clock tree still
+has the values from before the image was made. The uart0 mux was seen
+on the wrong parent, and the Bluetooth controller behind uart0 never
+answered. Save the registers before the image is made and write them
+back when it is restored, leaving CLKSEL_CON0, 1 and 26 (CPU, bus,
+DDR) alone. A fractional divider takes a new value only while the mux
+after it selects it, so the fractional dividers are reloaded through
+their muxes, with the USB PHY PLL kept running meanwhile.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff --git a/drivers/clk/rockchip/clk-rk3128.c b/drivers/clk/rockchip/clk-rk3128.c
+index 7c3d92af12df..2a3698f383ce 100644
+--- a/drivers/clk/rockchip/clk-rk3128.c
++++ b/drivers/clk/rockchip/clk-rk3128.c
+@@ -9,6 +9,8 @@
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/syscore_ops.h>
++#include <linux/delay.h>
++#include <linux/regmap.h>
+ #include <dt-bindings/clock/rk3128-cru.h>
+ #include "clk.h"
+ 
+@@ -570,6 +572,143 @@ static const char *const rk3128_critical_clocks[] __initconst = {
+ 	"sclk_timer5",
+ };
+ 
++/*
++ * The muxes and dividers in CLKSEL_CON are written by the clock framework only
++ * when it thinks they change.  After a hibernation image is restored they hold
++ * what the boot loader and the kernel that loaded the image left there, while
++ * the clock tree of the restored kernel still has the values from before the
++ * image was made.  The uart0_src mux was seen left on gpll while the tree had
++ * usb480m, so uart0 ran at the wrong rate and the Bluetooth controller behind
++ * it never answered.  Save the registers before the image is made and write
++ * them back when it is restored; after a normal suspend, or when the image is
++ * not used, this writes the same values again.
++ * CLKSEL_CON0 and 1 (CPU, bus) and 26 (DDR) are left alone: armclk sets them
++ * itself, and the DDR divider must not change while running from DDR.
++ * Most CLKSEL_CON registers take a write mask in the upper 16 bits, but the
++ * fractional dividers (7, 8 and 17 to 20) use all 32 bits for the numerator
++ * and denominator, so those are written back as they are.
++ * The usb480m input of the PLL muxes comes from the USB PHY, whose PLL is
++ * powered down in suspend when GRF_UOC1_CON4 bit 15 (COMMONONN) is set; it is
++ * usually set at this point, both in the saved state and as the loading kernel
++ * left it.  Clear it while the registers are written back and the fractional
++ * dividers below are reloaded, so that their sources run, and put it back to
++ * its saved state afterwards.
++ * A fractional divider takes a new value only while the mux after it selects
++ * it (rockchip_clk_frac_notifier_cb remuxes for this when the rate changes).
++ * Written back here while that mux selects the integer divider, it keeps what
++ * the loading kernel left in it although the register reads back right; when
++ * the clock tree later moves the mux onto it, it writes the same value, which
++ * does not reload it.  uart0 stayed dead after every restore that put
++ * sclk_uart0 on uart0_src, until CLKSEL_CON17 was written with another value
++ * and back while sclk_uart0 was on uart0_frac.  So reload each one with its
++ * source and its own gate open and its mux on it for the moment.
++ */
++static const u8 rk3128_saved_clksel[] = {
++	2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
++	17, 18, 19, 20, 23, 24, 25, 27, 28, 29, 30, 31, 32, 34,
++};
++
++/* CLKSEL_CON registers that are fractional dividers (no write mask) */
++#define RK3128_CLKSEL_FRAC_MASK	(BIT(7) | BIT(8) | BIT(17) | BIT(18) | \
++				 BIT(19) | BIT(20))
++
++#define RK3128_GRF_UOC1_CON4		0x190
++#define RK3128_UOC1_COMMONONN		BIT(15)
++
++/*
++ * fractional dividers: CLKSEL_CON of the divider, CLKGATE_CON and bit of the
++ * source and of the divider, and CLKSEL_CON of the mux after it (bits 9:8,
++ * where 1 selects the divider)
++ */
++static const u8 rk3128_frac_gates[][6] = {
++	{  7, 0,  9, 0, 10,  3 },	/* i2s1 */
++	{  8, 4,  4, 4,  5,  9 },	/* i2s0 */
++	{ 17, 1,  8, 1,  9, 13 },	/* uart0 */
++	{ 18, 1, 10, 1, 11, 14 },	/* uart1 */
++	{ 19, 1, 13, 1, 13, 15 },	/* uart2: both gates are bit 13 in this driver */
++	{ 20, 2, 10, 2, 12,  6 },	/* spdif */
++};
++
++static void __iomem *rk3128_cru_base;
++static struct regmap *rk3128_grf;
++static u32 rk3128_saved_uoc1_con4;
++static u32 rk3128_saved_clksel_regs[ARRAY_SIZE(rk3128_saved_clksel)];
++
++static int rk3128_clk_suspend(void *data)
++{
++	int i;
++
++	if (rk3128_grf)
++		regmap_read(rk3128_grf, RK3128_GRF_UOC1_CON4, &rk3128_saved_uoc1_con4);
++
++	for (i = 0; i < ARRAY_SIZE(rk3128_saved_clksel); i++)
++		rk3128_saved_clksel_regs[i] = readl_relaxed(rk3128_cru_base +
++				RK2928_CLKSEL_CON(rk3128_saved_clksel[i]));
++	return 0;
++}
++
++static void rk3128_clk_resume(void *data)
++{
++	int i;
++	u32 uoc;
++
++	if (rk3128_grf && !regmap_read(rk3128_grf, RK3128_GRF_UOC1_CON4, &uoc) &&
++	    (uoc & RK3128_UOC1_COMMONONN)) {
++		regmap_write(rk3128_grf, RK3128_GRF_UOC1_CON4,
++			     RK3128_UOC1_COMMONONN << 16);
++		udelay(2000);
++	}
++
++	for (i = 0; i < ARRAY_SIZE(rk3128_saved_clksel); i++) {
++		u8 n = rk3128_saved_clksel[i];
++		u32 v = rk3128_saved_clksel_regs[i];
++
++		/* the mask covers 7 to 20 only; n goes up to 34 */
++		if (n >= 32 || !(RK3128_CLKSEL_FRAC_MASK & BIT(n)))
++			v |= 0xffff0000;
++		writel_relaxed(v, rk3128_cru_base + RK2928_CLKSEL_CON(n));
++	}
++
++	for (i = 0; i < ARRAY_SIZE(rk3128_frac_gates); i++) {
++		const u8 *f = rk3128_frac_gates[i];
++		void __iomem *sel = rk3128_cru_base + RK2928_CLKSEL_CON(f[0]);
++		void __iomem *gs = rk3128_cru_base + RK2928_CLKGATE_CON(f[1]);
++		void __iomem *gf = rk3128_cru_base + RK2928_CLKGATE_CON(f[3]);
++		void __iomem *mux = rk3128_cru_base + RK2928_CLKSEL_CON(f[5]);
++		u32 os = readl_relaxed(gs) & BIT(f[2]), of = readl_relaxed(gf) & BIT(f[4]);
++		u32 om = readl_relaxed(mux) & (0x3 << 8);
++		u32 v = readl_relaxed(sel);
++
++		writel_relaxed(BIT(f[2] + 16), gs);
++		writel_relaxed(BIT(f[4] + 16), gf);
++		writel_relaxed((0x3 << 24) | (0x1 << 8), mux);
++		udelay(1);
++		writel_relaxed(v ^ 1, sel);
++		udelay(1);
++		writel_relaxed(v, sel);
++		udelay(1);
++		writel_relaxed((0x3 << 24) | om, mux);
++		writel_relaxed(BIT(f[4] + 16) | of, gf);
++		writel_relaxed(BIT(f[2] + 16) | os, gs);
++	}
++
++	if (rk3128_grf) {
++		udelay(10);
++		regmap_write(rk3128_grf, RK3128_GRF_UOC1_CON4,
++			     (RK3128_UOC1_COMMONONN << 16) |
++			     (rk3128_saved_uoc1_con4 & RK3128_UOC1_COMMONONN));
++	}
++}
++
++static const struct syscore_ops rk3128_clk_syscore_ops = {
++	.suspend = rk3128_clk_suspend,
++	.resume = rk3128_clk_resume,
++};
++
++static struct syscore rk3128_clk_syscore = {
++	.ops = &rk3128_clk_syscore_ops,
++};
++
+ static struct rockchip_clk_provider *__init rk3128_common_clk_init(struct device_node *np,
+ 								   unsigned long soc_nr_clks)
+ {
+@@ -608,6 +747,11 @@ static struct rockchip_clk_provider *__init rk3128_common_clk_init(struct device
+ 
+ 	rockchip_register_restart_notifier(ctx, RK2928_GLB_SRST_FST, NULL);
+ 
++	rk3128_cru_base = reg_base;
++	if (!IS_ERR(ctx->grf))
++		rk3128_grf = ctx->grf;
++	register_syscore(&rk3128_clk_syscore);
++
+ 	return ctx;
+ }
+ 

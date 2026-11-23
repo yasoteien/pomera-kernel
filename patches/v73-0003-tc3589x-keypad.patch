@@ -1,0 +1,596 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] Input: tc3589x-keypad: Read the held keys from the key code registers
+
+Read which keys are held down from KBDCODE0-3 and report the keys that
+changed since the last read, instead of the event FIFO. Modifiers are
+reported first, so that a modifier pressed together with another key
+is seen before that key. The keypad is disabled in suspend unless it
+is a wakeup source.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff --git a/drivers/input/keyboard/tc3589x-keypad.c b/drivers/input/keyboard/tc3589x-keypad.c
+index 11988cffdfae..f42e81ce82ce 100644
+--- a/drivers/input/keyboard/tc3589x-keypad.c
++++ b/drivers/input/keyboard/tc3589x-keypad.c
+@@ -9,6 +9,8 @@
+  */
+ 
+ #include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/of.h>
+ #include <linux/interrupt.h>
+ #include <linux/input.h>
+ #include <linux/platform_device.h>
+@@ -64,11 +66,21 @@
+ #define TC3589x_EVT_INT		0x4
+ #define TC3589x_KBD_LOSS_INT	0x2
+ #define TC3589x_KBD_INT		0x1
++#define TC3589x_KBD_ALL_INT	0xF
+ 
+ /* bit masks for keyboard interrupt clear*/
+ #define TC3589x_EVT_INT_CLR	0x2
+ #define TC3589x_KBD_INT_CLR	0x1
+ 
++/* Key code registers: the keys held down now, up to four */
++#define TC3589x_KBDCODE0	0x0B
++#define TC3589x_KBDCODE_NUM	4
++#define KP_KBDCODE_MULTIKEY	0x80
++
++static bool debug_key_state;
++module_param(debug_key_state, bool, 0644);
++MODULE_PARM_DESC(debug_key_state, "Log the key code registers on each interrupt");
++
+ /**
+  * struct tc3589x_keypad_platform_data - platform specific keypad data
+  * @keymap_data:        matrix scan code table for keycodes
+@@ -100,6 +112,10 @@ struct tc3589x_keypad_platform_data {
+  * @kcol:	number of columns
+  * @keymap:     matrix scan code table for keycodes
+  * @keypad_stopped: holds keypad status
++ * @suspend_disabled: keypad was disabled by suspend
++ * @wake_enabled: keypad IRQ was armed for wakeup by suspend
++ * @read_state: read the key code registers instead of the event FIFO
++ * @key_state:  keys held down at the last read, one bit per column
+  */
+ struct tc_keypad {
+ 	struct tc3589x *tc3589x;
+@@ -109,6 +125,10 @@ struct tc_keypad {
+ 	unsigned int kcol;
+ 	unsigned short *keymap;
+ 	bool keypad_stopped;
++	bool suspend_disabled;
++	bool wake_enabled;
++	bool read_state;
++	u16 key_state[TC3589x_MAX_KPROW];
+ };
+ 
+ static int tc3589x_keypad_init_key_hardware(struct tc_keypad *keypad)
+@@ -184,7 +204,96 @@ static int tc3589x_keypad_init_key_hardware(struct tc_keypad *keypad)
+ #define TC35893_DATA_REGS		4
+ #define TC35893_KEYCODE_FIFO_EMPTY	0x7f
+ #define TC35893_KEYCODE_FIFO_CLEAR	0xff
+-#define TC35893_KEYPAD_ROW_SHIFT	0x3
++#define TC35893_KEYPAD_ROW_SHIFT	0x4
++
++static bool tc3589x_keypad_is_modifier(unsigned short keycode)
++{
++	switch (keycode) {
++	case KEY_LEFTCTRL:
++	case KEY_LEFTSHIFT:
++	case KEY_RIGHTSHIFT:
++	case KEY_LEFTALT:
++	case KEY_RIGHTCTRL:
++	case KEY_RIGHTALT:
++	case KEY_LEFTMETA:
++	case KEY_RIGHTMETA:
++		return true;
++	default:
++		return false;
++	}
++}
++
++/*
++ * Read which keys are held down now from KBDCODE0-3 and report the keys
++ * that changed since the last read.  Modifiers go first, so a modifier
++ * pressed together with another key is seen before that key.
++ */
++static void tc3589x_keypad_read_state(struct tc_keypad *keypad)
++{
++	struct tc3589x *tc3589x = keypad->tc3589x;
++	const struct tc3589x_keypad_platform_data *board = keypad->board;
++	u16 state[TC3589x_MAX_KPROW] = { };
++	u8 kbd_code[TC3589x_KBDCODE_NUM] = { };
++	unsigned int row, col, code;
++	unsigned short keycode;
++	bool modifiers;
++	int i, ret;
++
++	ret = tc3589x_reg_write(tc3589x, TC3589x_KBDIC,
++				TC3589x_EVT_INT_CLR | TC3589x_KBD_INT_CLR);
++	if (ret < 0)
++		return;
++
++	for (i = 0; i < TC3589x_KBDCODE_NUM; i++) {
++		ret = tc3589x_reg_read(tc3589x, TC3589x_KBDCODE0 + i);
++		if (ret < 0)
++			return;
++		kbd_code[i] = ret;
++	}
++
++	if (debug_key_state)
++		dev_info(tc3589x->dev, "DM250 KBDCODE: %*ph\n",
++			 TC3589x_KBDCODE_NUM, kbd_code);
++
++	for (i = 0; i < TC3589x_KBDCODE_NUM; i++) {
++		if ((kbd_code[i] & KP_NO_VALID_KEY_MASK) == KP_NO_VALID_KEY_MASK)
++			break;
++
++		row = (kbd_code[i] & KP_EVCODE_ROW_MASK) >> KP_ROW_SHIFT;
++		col = kbd_code[i] & KP_EVCODE_COL_MASK;
++		if (row >= board->krow || col >= board->kcol)
++			return;
++
++		state[row] |= BIT(col);
++
++		if (!(kbd_code[i] & KP_KBDCODE_MULTIKEY))
++			break;
++	}
++
++	for (i = 0; i < 2; i++) {
++		modifiers = (i == 0);
++
++		for (row = 0; row < board->krow; row++) {
++			for (col = 0; col < board->kcol; col++) {
++				if (!((keypad->key_state[row] ^ state[row]) & BIT(col)))
++					continue;
++
++				code = MATRIX_SCAN_CODE(row, col,
++							TC35893_KEYPAD_ROW_SHIFT);
++				keycode = keypad->keymap[code];
++				if (tc3589x_keypad_is_modifier(keycode) != modifiers)
++					continue;
++
++				input_event(keypad->input, EV_MSC, MSC_SCAN, code);
++				input_report_key(keypad->input, keycode,
++						 state[row] & BIT(col));
++			}
++		}
++	}
++
++	memcpy(keypad->key_state, state, sizeof(keypad->key_state));
++	input_sync(keypad->input);
++}
+ 
+ static irqreturn_t tc3589x_keypad_irq(int irq, void *dev)
+ {
+@@ -193,6 +302,11 @@ static irqreturn_t tc3589x_keypad_irq(int irq, void *dev)
+ 	u8 i, row_index, col_index, kbd_code, up;
+ 	u8 code;
+ 
++	if (keypad->read_state) {
++		tc3589x_keypad_read_state(keypad);
++		return IRQ_HANDLED;
++	}
++
+ 	for (i = 0; i < TC35893_DATA_REGS * 2; i++) {
+ 		kbd_code = tc3589x_reg_read(tc3589x, TC3589x_EVTCODE_FIFO);
+ 
+@@ -223,6 +337,8 @@ static irqreturn_t tc3589x_keypad_irq(int irq, void *dev)
+ 	return IRQ_HANDLED;
+ }
+ 
++static int tc3589x_keypad_disable(struct tc_keypad *keypad);
++
+ static int tc3589x_keypad_enable(struct tc_keypad *keypad)
+ {
+ 	struct tc3589x *tc3589x = keypad->tc3589x;
+@@ -231,32 +347,44 @@ static int tc3589x_keypad_enable(struct tc_keypad *keypad)
+ 	/* pull the keypad module out of reset */
+ 	ret = tc3589x_set_bits(tc3589x, TC3589x_RSTCTRL, TC3589x_KBDRST, 0x0);
+ 	if (ret < 0)
+-		return ret;
++		goto err_disable;
+ 
+ 	/* configure KBDMFS */
+ 	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMFS, 0x0, TC3589x_KBDMFS_EN);
+ 	if (ret < 0)
+-		return ret;
++		goto err_disable;
+ 
+ 	/* enable the keypad clock */
+ 	ret = tc3589x_set_bits(tc3589x, TC3589x_CLKEN, 0x0, KPD_CLK_EN);
+ 	if (ret < 0)
+-		return ret;
++		goto err_disable;
++
++	ret = tc3589x_keypad_init_key_hardware(keypad);
++	if (ret < 0)
++		goto err_disable;
++
++	memset(keypad->key_state, 0, sizeof(keypad->key_state));
+ 
+ 	/* clear pending IRQs */
+ 	ret =  tc3589x_set_bits(tc3589x, TC3589x_RSTINTCLR, 0x0, 0x1);
+ 	if (ret < 0)
+-		return ret;
++		goto err_disable;
+ 
+-	/* enable the IRQs */
+-	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMSK, 0x0,
++	/* enable the key status IRQs, keep the event FIFO IRQs masked */
++	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMSK, TC3589x_KBD_ALL_INT,
+ 					TC3589x_EVT_LOSS_INT | TC3589x_EVT_INT);
+ 	if (ret < 0)
+-		return ret;
++		goto err_disable;
+ 
+ 	keypad->keypad_stopped = false;
+ 
+ 	return ret;
++
++err_disable:
++	if (tc3589x_keypad_disable(keypad))
++		dev_err(&keypad->input->dev,
++			"failed to stop keypad after enable error\n");
++	return ret;
+ }
+ 
+ static int tc3589x_keypad_disable(struct tc_keypad *keypad)
+@@ -270,9 +398,9 @@ static int tc3589x_keypad_disable(struct tc_keypad *keypad)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	/* disable all interrupts */
++	/* mask all interrupts */
+ 	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMSK,
+-			~(TC3589x_EVT_LOSS_INT | TC3589x_EVT_INT), 0x0);
++			TC3589x_KBD_ALL_INT, TC3589x_KBD_ALL_INT);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -282,7 +410,10 @@ static int tc3589x_keypad_disable(struct tc_keypad *keypad)
+ 		return ret;
+ 
+ 	/* put the keypad module into reset */
+-	ret = tc3589x_set_bits(tc3589x, TC3589x_RSTCTRL, TC3589x_KBDRST, 0x1);
++	ret = tc3589x_set_bits(tc3589x, TC3589x_RSTCTRL, TC3589x_KBDRST,
++			       TC3589x_KBDRST);
++	if (ret < 0)
++		return ret;
+ 
+ 	keypad->keypad_stopped = true;
+ 
+@@ -301,12 +432,6 @@ static int tc3589x_keypad_open(struct input_dev *input)
+ 		return error;
+ 	}
+ 
+-	error = tc3589x_keypad_init_key_hardware(keypad);
+-	if (error < 0) {
+-		dev_err(&input->dev, "failed to configure keypad module\n");
+-		return error;
+-	}
+-
+ 	return 0;
+ }
+ 
+@@ -323,8 +448,8 @@ tc3589x_keypad_of_probe(struct device *dev)
+ {
+ 	struct device_node *np = dev->of_node;
+ 	struct tc3589x_keypad_platform_data *plat;
+-	u32 cols, rows;
+-	u32 debounce_ms;
++	u32 cols = 0, rows = 0;
++	u32 debounce_ms = 0;
+ 
+ 	if (!np)
+ 		return ERR_PTR(-ENODEV);
+@@ -338,7 +463,7 @@ tc3589x_keypad_of_probe(struct device *dev)
+ 	plat->kcol = (u8) cols;
+ 	plat->krow = (u8) rows;
+ 	if (!plat->krow || !plat->kcol ||
+-	     plat->krow > TC_KPD_ROWS || plat->kcol > TC_KPD_COLUMNS) {
++	     plat->krow > TC3589x_MAX_KPROW || plat->kcol > TC3589x_MAX_KPCOL) {
+ 		dev_err(dev,
+ 			"keypad columns/rows not properly specified (%ux%u)\n",
+ 			plat->kcol, plat->krow);
+@@ -402,6 +527,7 @@ static int tc3589x_keypad_probe(struct platform_device *pdev)
+ 	keypad->board = plat;
+ 	keypad->input = input;
+ 	keypad->tc3589x = tc3589x;
++	keypad->read_state = of_machine_is_compatible("kingjim,pomera-dm250");
+ 
+ 	input->id.bustype = BUS_I2C;
+ 	input->name = pdev->name;
+@@ -421,12 +547,16 @@ static int tc3589x_keypad_probe(struct platform_device *pdev)
+ 	keypad->keymap = input->keycode;
+ 
+ 	input_set_capability(input, EV_MSC, MSC_SCAN);
+-	if (!plat->no_autorepeat)
++	if (!plat->no_autorepeat) {
+ 		__set_bit(EV_REP, input->evbit);
++		input_enable_softrepeat(input, 250, 33);
++	}
+ 
+ 	input_set_drvdata(input, keypad);
+ 
+-	tc3589x_keypad_disable(keypad);
++	error = tc3589x_keypad_disable(keypad);
++	if (error)
++		return error;
+ 
+ 	error = devm_request_threaded_irq(&pdev->dev, irq,
+ 					  NULL, tc3589x_keypad_irq,
+@@ -459,18 +589,34 @@ static int tc3589x_keypad_suspend(struct device *dev)
+ 	struct platform_device *pdev = to_platform_device(dev);
+ 	struct tc_keypad *keypad = platform_get_drvdata(pdev);
+ 	int irq = platform_get_irq(pdev, 0);
++	int error;
++
++	guard(mutex)(&keypad->input->mutex);
+ 
+ 	/* keypad is already off; we do nothing */
+-	if (keypad->keypad_stopped)
++	if (keypad->keypad_stopped || keypad->suspend_disabled)
+ 		return 0;
+ 
+-	/* if device is not a wakeup source, disable it for powersave */
+-	if (!device_may_wakeup(&pdev->dev))
+-		tc3589x_keypad_disable(keypad);
+-	else
+-		enable_irq_wake(irq);
++	if (device_may_wakeup(&pdev->dev)) {
++		error = enable_irq_wake(irq);
++		if (!error)
++			keypad->wake_enabled = true;
++		return error;
++	}
+ 
+-	return 0;
++	/* not a wakeup source: disable it for powersave */
++	disable_irq(irq);
++	error = tc3589x_keypad_disable(keypad);
++	if (!error) {
++		keypad->suspend_disabled = true;
++		return 0;
++	}
++
++	if (tc3589x_keypad_enable(keypad))
++		dev_err(dev, "failed to restore keypad after suspend error\n");
++	enable_irq(irq);
++
++	return error;
+ }
+ 
+ static int tc3589x_keypad_resume(struct device *dev)
+@@ -478,15 +624,34 @@ static int tc3589x_keypad_resume(struct device *dev)
+ 	struct platform_device *pdev = to_platform_device(dev);
+ 	struct tc_keypad *keypad = platform_get_drvdata(pdev);
+ 	int irq = platform_get_irq(pdev, 0);
++	int error;
+ 
+-	if (!keypad->keypad_stopped)
++	guard(mutex)(&keypad->input->mutex);
++
++	if (keypad->wake_enabled) {
++		error = disable_irq_wake(irq);
++		if (error)
++			return error;
++		keypad->wake_enabled = false;
++		disable_irq(irq);
++	} else if (keypad->suspend_disabled) {
++		/* enable the device to resume normal operations */
++		error = tc3589x_keypad_enable(keypad);
++		keypad->suspend_disabled = false;
++		if (error) {
++			enable_irq(irq);
++			return error;
++		}
++	} else {
+ 		return 0;
++	}
+ 
+-	/* enable the device to resume normal operations */
+-	if (!device_may_wakeup(&pdev->dev))
+-		tc3589x_keypad_enable(keypad);
+-	else
+-		disable_irq_wake(irq);
++	/* keys may have changed while asleep: report them afresh */
++	if (keypad->read_state) {
++		memset(keypad->key_state, 0, sizeof(keypad->key_state));
++		tc3589x_keypad_read_state(keypad);
++	}
++	enable_irq(irq);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/mfd/tc3589x.c b/drivers/mfd/tc3589x.c
+index 2d4eb771e230..45287697b597 100644
+--- a/drivers/mfd/tc3589x.c
++++ b/drivers/mfd/tc3589x.c
+@@ -6,6 +6,8 @@
+  * Author: Rabin Vincent <rabin.vincent@stericsson.com> for ST-Ericsson
+  */
+ 
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/module.h>
+ #include <linux/interrupt.h>
+ #include <linux/irq.h>
+@@ -206,13 +208,36 @@ static irqreturn_t tc3589x_irq(int irq, void *data)
+ 	return IRQ_HANDLED;
+ }
+ 
++static void tc3589x_irq_noop(struct irq_data *data)
++{
++}
++
++/*
++ * Pass wake requests from the keypad on to the I2C interrupt, so the
++ * keyboard can wake the system (dummy_irq_chip skips set_wake).
++ */
++static int tc3589x_irq_set_wake(struct irq_data *data, unsigned int on)
++{
++	struct tc3589x *tc3589x = irq_data_get_irq_chip_data(data);
++
++	return irq_set_irq_wake(tc3589x->i2c->irq, on);
++}
++
++static struct irq_chip tc3589x_irq_chip = {
++	.name		= "tc3589x",
++	.irq_ack	= tc3589x_irq_noop,
++	.irq_mask	= tc3589x_irq_noop,
++	.irq_unmask	= tc3589x_irq_noop,
++	.irq_set_wake	= tc3589x_irq_set_wake,
++};
++
+ static int tc3589x_irq_map(struct irq_domain *d, unsigned int virq,
+ 				irq_hw_number_t hwirq)
+ {
+ 	struct tc3589x *tc3589x = d->host_data;
+ 
+ 	irq_set_chip_data(virq, tc3589x);
+-	irq_set_chip_and_handler(virq, &dummy_irq_chip,
++	irq_set_chip_and_handler(virq, &tc3589x_irq_chip,
+ 				handle_edge_irq);
+ 	irq_set_nested_thread(virq, 1);
+ 	irq_set_noprobe(virq);
+@@ -246,6 +271,13 @@ static int tc3589x_irq_init(struct tc3589x *tc3589x, struct device_node *np)
+ 	return 0;
+ }
+ 
++static const char *const tc3589x_pomera_compats[] = {
++	"kingjim,pomera-dm200",
++	"kingjim,pomera-dm250",
++	"kingjim,pomera-dm250us",
++	NULL
++};
++
+ static int tc3589x_chip_init(struct tc3589x *tc3589x)
+ {
+ 	int manf, ver, ret;
+@@ -277,8 +309,32 @@ static int tc3589x_chip_init(struct tc3589x *tc3589x)
+ 	if (ret < 0)
+ 		return ret;
+ 
++	/* Clear and mask the dedicated key interrupts (not used). */
++	ret = tc3589x_reg_write(tc3589x, TC3589x_DKBDIC, 0x3);
++	if (ret < 0)
++		return ret;
++
++	ret = tc3589x_reg_write(tc3589x, TC3589x_DKBDMSK, 0x3);
++	if (ret < 0)
++		return ret;
++
+ 	/* Clear the reset interrupt. */
+-	return tc3589x_reg_write(tc3589x, TC3589x_RSTINTCLR, 0x1);
++	ret = tc3589x_reg_write(tc3589x, TC3589x_RSTINTCLR, 0x1);
++	if (ret)
++		return ret;
++
++	/* Pomera: stop all module clocks and set the clock as the vendor did */
++	if (of_machine_compatible_match(tc3589x_pomera_compats)) {
++		ret = tc3589x_reg_write(tc3589x, TC3589x_CLKEN, 0x0);
++		if (ret < 0)
++			return ret;
++
++		ret = tc3589x_reg_write(tc3589x, TC3589x_CLKCFG, 0x43);
++		if (ret < 0)
++			return ret;
++	}
++
++	return 0;
+ }
+ 
+ static int tc3589x_device_init(struct tc3589x *tc3589x)
+@@ -356,6 +412,7 @@ static int tc3589x_probe(struct i2c_client *i2c)
+ 	struct device_node *np = i2c->dev.of_node;
+ 	struct tc3589x_platform_data *pdata = dev_get_platdata(&i2c->dev);
+ 	struct tc3589x *tc3589x;
++	struct gpio_desc *reset_gpio;
+ 	enum tc3589x_version version;
+ 	int ret;
+ 
+@@ -374,6 +431,17 @@ static int tc3589x_probe(struct i2c_client *i2c)
+ 				     | I2C_FUNC_SMBUS_I2C_BLOCK))
+ 		return -EIO;
+ 
++	reset_gpio = devm_gpiod_get_optional(&i2c->dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(reset_gpio))
++		return dev_err_probe(&i2c->dev, PTR_ERR(reset_gpio),
++				     "failed to get reset GPIO\n");
++	if (reset_gpio) {
++		gpiod_set_value_cansleep(reset_gpio, 1);
++		usleep_range(1000, 2000);
++		gpiod_set_value_cansleep(reset_gpio, 0);
++		usleep_range(1000, 2000);
++	}
++
+ 	tc3589x = devm_kzalloc(&i2c->dev, sizeof(struct tc3589x),
+ 				GFP_KERNEL);
+ 	if (!tc3589x)
+@@ -438,12 +506,20 @@ static int tc3589x_suspend(struct device *dev)
+ {
+ 	struct tc3589x *tc3589x = dev_get_drvdata(dev);
+ 	struct i2c_client *client = tc3589x->i2c;
+-	int ret = 0;
++	int ret;
++
++	if (device_may_wakeup(&client->dev))
++		return 0;
++
++	/* keep running if a child (the keypad) armed our IRQ for wakeup */
++	if (irqd_is_wakeup_set(irq_get_irq_data(client->irq)))
++		return 0;
+ 
+ 	/* put the system to sleep mode */
+-	if (!device_may_wakeup(&client->dev))
+-		ret = tc3589x_reg_write(tc3589x, TC3589x_CLKMODE,
++	ret = tc3589x_reg_write(tc3589x, TC3589x_CLKMODE,
+ 				TC3589x_CLKMODE_MODCTL_SLEEP);
++	if (!ret)
++		tc3589x->sleeping = true;
+ 
+ 	return ret;
+ }
+@@ -451,13 +527,16 @@ static int tc3589x_suspend(struct device *dev)
+ static int tc3589x_resume(struct device *dev)
+ {
+ 	struct tc3589x *tc3589x = dev_get_drvdata(dev);
+-	struct i2c_client *client = tc3589x->i2c;
+-	int ret = 0;
++	int ret;
++
++	if (!tc3589x->sleeping)
++		return 0;
+ 
+ 	/* enable the system into operation */
+-	if (!device_may_wakeup(&client->dev))
+-		ret = tc3589x_reg_write(tc3589x, TC3589x_CLKMODE,
++	ret = tc3589x_reg_write(tc3589x, TC3589x_CLKMODE,
+ 				TC3589x_CLKMODE_MODCTL_OPERATION);
++	if (!ret)
++		tc3589x->sleeping = false;
+ 
+ 	return ret;
+ }
+diff --git a/include/linux/mfd/tc3589x.h b/include/linux/mfd/tc3589x.h
+index b84955410e03..b0421fb5f234 100644
+--- a/include/linux/mfd/tc3589x.h
++++ b/include/linux/mfd/tc3589x.h
+@@ -105,6 +105,7 @@ enum tx3589x_block {
+ #define TC3589x_GPIOODE2	0xE5
+ 
+ #define TC3589x_DIRECT0		0xEC
++#define TC3589x_DKBDIC		0xF2
+ #define TC3589x_DKBDMSK		0xF3
+ 
+ #define TC3589x_INT_GPIIRQ	0
+@@ -122,6 +123,7 @@ struct tc3589x {
+ 	struct device *dev;
+ 	struct i2c_client *i2c;
+ 	struct irq_domain *domain;
++	bool sleeping;
+ 
+ 	int irq_base;
+ 	int num_gpio;

@@ -1,0 +1,21 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] power: supply: rk818: Queue the forced power-off on system_dfl_wq
+
+system_unbound_wq is deprecated in 7.3 and warns once when work is
+queued on it. system_dfl_wq is the same kind of unbound workqueue.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index 4790a8a79eee..8be881175ec1 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -1215,7 +1215,7 @@ static void rk818_monitor_work(struct work_struct *work)
+ 		/* No forced step from the kernel: it would end in a restart */
+ 		__hw_protection_trigger("RK818 battery voltage too low", -1,
+ 					HWPROT_ACT_SHUTDOWN);
+-		queue_delayed_work(system_unbound_wq, &ch->off_work,
++		queue_delayed_work(system_dfl_wq, &ch->off_work,
+ 				   msecs_to_jiffies(RK818_FORCE_OFF_MS));
+ 	} else {
+ 		if (ret) {

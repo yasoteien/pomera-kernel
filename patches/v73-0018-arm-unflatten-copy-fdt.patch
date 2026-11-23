@@ -1,0 +1,32 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] ARM: Copy the FDT into lowmem before unflattening it
+
+The unflattened properties point into the blob. The boot loader may
+place the blob high in RAM (in highmem), where reserved pages are not
+saved in a hibernation image, and it rewrites the blob on the next
+boot (e.g. bootargs). After a resume the properties would then point
+at different data. Use unflatten_and_copy_device_tree().
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff --git a/arch/arm/kernel/setup.c b/arch/arm/kernel/setup.c
+index 0bfd66c7ada0..ada21432c834 100644
+--- a/arch/arm/kernel/setup.c
++++ b/arch/arm/kernel/setup.c
+@@ -1163,7 +1163,15 @@ void __init setup_arch(char **cmdline_p)
+ 		register_restart_handler(&arm_restart_nb);
+ 	}
+ 
+-	unflatten_device_tree();
++	/*
++	 * Copy the FDT into memblock memory (lowmem) before unflattening it.
++	 * The unflattened properties point into the blob.  The boot loader may
++	 * place the blob high in RAM (in highmem), where reserved pages are not
++	 * saved in a hibernation image, and it rewrites the blob on the next
++	 * boot (e.g. bootargs).  After a resume the properties would then point
++	 * at different data.
++	 */
++	unflatten_and_copy_device_tree();
+ 
+ 	arm_dt_init_cpu_maps();
+ 	psci_dt_init();

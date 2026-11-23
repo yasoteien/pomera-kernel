@@ -1,0 +1,48 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] drm/rockchip: lvds: Keep the panel after wrapping it in a bridge
+
+Since commit b71a623598d3 ("drm/panel: of_drm_find_panel() return a
+counted reference"), bind drops the panel lookup reference and clears
+lvds->panel right after drm_panel_bridge_add_typed().  But the driver
+then replaces the bridge funcs with rockchip_lvds_bridge_funcs, so the
+panel bridge never prepares or enables the panel, and the encoder
+enable and get_modes still use lvds->panel.  With lvds->panel NULL,
+drm_panel_prepare()/drm_panel_enable() do nothing and the panel (and
+its backlight) stays off.
+
+Keep lvds->panel and its lookup reference, and drop it in unbind.
+
+Fixes: b71a623598d3 ("drm/panel: of_drm_find_panel() return a counted reference")
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff --git a/drivers/gpu/drm/rockchip/rockchip_lvds.c b/drivers/gpu/drm/rockchip/rockchip_lvds.c
+index ef19675d1f7f..ad835160253a 100644
+--- a/drivers/gpu/drm/rockchip/rockchip_lvds.c
++++ b/drivers/gpu/drm/rockchip/rockchip_lvds.c
+@@ -714,9 +714,13 @@ static int rockchip_lvds_bind(struct device *dev, struct device *master,
+ 	drm_encoder_helper_add(encoder, lvds->soc_data->helper_funcs);
+ 
+ 	if (lvds->panel) {
++		/*
++		 * Keep lvds->panel and its lookup reference: the bridge funcs
++		 * are replaced below, so the panel bridge never prepares or
++		 * enables the panel, and the encoder enable and get_modes use
++		 * lvds->panel.  The reference is dropped in unbind.
++		 */
+ 		lvds->bridge = drm_panel_bridge_add_typed(lvds->panel, DRM_MODE_CONNECTOR_LVDS);
+-		drm_panel_put(lvds->panel);
+-		lvds->panel = NULL;
+ 		if (IS_ERR(lvds->bridge)) {
+ 			ret = PTR_ERR(lvds->bridge);
+ 			goto err_free_encoder;
+@@ -771,6 +775,10 @@ static void rockchip_lvds_unbind(struct device *dev, struct device *master,
+ 	encoder_funcs = lvds->soc_data->helper_funcs;
+ 	encoder_funcs->disable(&lvds->encoder.encoder);
+ 	pm_runtime_disable(dev);
++	if (lvds->panel) {
++		drm_panel_put(lvds->panel);
++		lvds->panel = NULL;
++	}
+ }
+ 
+ static const struct component_ops rockchip_lvds_component_ops = {

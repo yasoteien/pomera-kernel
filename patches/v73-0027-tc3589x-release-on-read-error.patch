@@ -1,0 +1,88 @@
+From b5f766b0c85f38726cc8935ab989a00d6181a176 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:55:14 +0900
+Subject: [PATCH 27/30] Input: tc3589x-keypad: Release held keys when the state
+ is unreadable
+
+A failed I2C read of KBDIC or KBDCODE0-3, or a code outside the matrix,
+returned without updating the key state. A key held at that moment was
+then left pressed, and autorepeat went on until the next key event (a
+held Backspace kept deleting text). Report every held key as released
+instead; a key still held is reported again with the next key event.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/input/keyboard/tc3589x-keypad.c | 35 ++++++++++++++++++++++---
+ 1 file changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/input/keyboard/tc3589x-keypad.c b/drivers/input/keyboard/tc3589x-keypad.c
+index 8ba52fcd3102..80d36a906e41 100644
+--- a/drivers/input/keyboard/tc3589x-keypad.c
++++ b/drivers/input/keyboard/tc3589x-keypad.c
+@@ -219,6 +219,29 @@ static bool tc3589x_keypad_is_modifier(unsigned short keycode)
+ 	}
+ }
+ 
++/*
++ * The key state could not be read: report every held key as released, so
++ * that a key is not left repeating. A key still held is reported again
++ * with the next key event.
++ */
++static void tc3589x_keypad_release_all(struct tc_keypad *keypad)
++{
++	const struct tc3589x_keypad_platform_data *board = keypad->board;
++	unsigned int row, col, code;
++
++	for (row = 0; row < board->krow; row++) {
++		for (col = 0; col < board->kcol; col++) {
++			if (!(keypad->key_state[row] & BIT(col)))
++				continue;
++			code = MATRIX_SCAN_CODE(row, col, TC35893_KEYPAD_ROW_SHIFT);
++			input_event(keypad->input, EV_MSC, MSC_SCAN, code);
++			input_report_key(keypad->input, keypad->keymap[code], 0);
++		}
++	}
++	memset(keypad->key_state, 0, sizeof(keypad->key_state));
++	input_sync(keypad->input);
++}
++
+ /*
+  * Read which keys are held down now from KBDCODE0-3 and report the keys
+  * that changed since the last read.  Modifiers go first, so a modifier
+@@ -238,12 +261,12 @@ static void tc3589x_keypad_read_state(struct tc_keypad *keypad)
+ 	ret = tc3589x_reg_write(tc3589x, TC3589x_KBDIC,
+ 				TC3589x_EVT_INT_CLR | TC3589x_KBD_INT_CLR);
+ 	if (ret < 0)
+-		return;
++		goto release;
+ 
+ 	for (i = 0; i < TC3589x_KBDCODE_NUM; i++) {
+ 		ret = tc3589x_reg_read(tc3589x, TC3589x_KBDCODE0 + i);
+ 		if (ret < 0)
+-			return;
++			goto release;
+ 		kbd_code[i] = ret;
+ 	}
+ 
+@@ -254,7 +277,7 @@ static void tc3589x_keypad_read_state(struct tc_keypad *keypad)
+ 		row = (kbd_code[i] & KP_EVCODE_ROW_MASK) >> KP_ROW_SHIFT;
+ 		col = kbd_code[i] & KP_EVCODE_COL_MASK;
+ 		if (row >= board->krow || col >= board->kcol)
+-			return;
++			goto release;
+ 
+ 		state[row] |= BIT(col);
+ 
+@@ -285,6 +308,12 @@ static void tc3589x_keypad_read_state(struct tc_keypad *keypad)
+ 
+ 	memcpy(keypad->key_state, state, sizeof(keypad->key_state));
+ 	input_sync(keypad->input);
++	return;
++
++release:
++	dev_warn_ratelimited(tc3589x->dev, "key state unreadable (%d): keys released\n",
++			     ret < 0 ? ret : -EIO);
++	tc3589x_keypad_release_all(keypad);
+ }
+ 
+ static irqreturn_t tc3589x_keypad_irq(int irq, void *dev)

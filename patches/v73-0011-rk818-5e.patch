@@ -1,0 +1,266 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] power: supply: rk818: Shut down on a low battery
+
+Shut down when the battery is low, and use the low battery interrupt
+as a wakeup source.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index 14b366ff2e11..0c290c601d64 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -7,8 +7,8 @@
+  * vendor kernel of that device, so that both kernels can be booted on
+  * one machine without upsetting each other's state of charge.
+  *
+- * Stage 5d: the USB input current limit, the charger settings and the
+- * fuel gauge (counter calibration and the saved data) are written.
++ * Stage 5e: as 5d, plus the shutdown on a low battery and the low battery
++ * interrupt as a wakeup source.
+  */
+ 
+ #include <linux/bitfield.h>
+@@ -21,7 +21,9 @@
+ #include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_wakeirq.h>
+ #include <linux/power_supply.h>
++#include <linux/reboot.h>
+ #include <linux/regmap.h>
+ #include <linux/workqueue.h>
+ 
+@@ -86,6 +88,19 @@
+ #define RK818_OCV_TEMP_C		20
+ /* A negative counter is replaced by a voltage estimate after this */
+ #define RK818_NEG_CNT_MS		60000
++/* Below the minimum voltage for this long, or 50 mV below it: power off */
++#define RK818_LOW_VOLT_MS		60000
++#define RK818_LOW_VOLT_MARGIN_UV	50000
++#define RK818_SHUTDOWN_MS		10000
++
++/*
++ * Testing only: power off at this voltage instead of the battery minimum.
++ * The fuel gauge is then left as it is, so a test does not leave the
++ * next boot (of either kernel) with an empty battery.
++ */
++static int lowv_test_uv;
++module_param(lowv_test_uv, int, 0444);
++MODULE_PARM_DESC(lowv_test_uv, "Low battery shutdown voltage for testing (uV, 0: battery minimum)");
+ 
+ /*
+  * The registers this stage may write and the bits in them. Every write
+@@ -207,6 +222,11 @@ struct rk818_charger {
+ 	int saved_soc;
+ 	bool neg_cnt;
+ 	unsigned long neg_cnt_since;
++	bool low_volt;
++	unsigned long low_volt_since;
++	int shutdown_uv;
++	/* Set once the low battery shutdown has started */
++	bool dead;
+ };
+ 
+ static int rk818_plugged(struct rk818_charger *ch, bool *plugged)
+@@ -482,6 +502,20 @@ static int rk818_gauge_update(struct rk818_charger *ch)
+ 		return ret;
+ 	plugged = mon & RK818_PLUG_IN_STS;
+ 
++	/* Discharging below the minimum voltage */
++	if ((ua < 0 || (!plugged && ua == 0)) && uv < ch->shutdown_uv) {
++		if (!ch->low_volt) {
++			ch->low_volt = true;
++			ch->low_volt_since = jiffies;
++		}
++		if (uv <= ch->shutdown_uv - RK818_LOW_VOLT_MARGIN_UV ||
++		    time_after_eq(jiffies, ch->low_volt_since +
++					   msecs_to_jiffies(RK818_LOW_VOLT_MS)))
++			return -ESHUTDOWN;
++	} else {
++		ch->low_volt = false;
++	}
++
+ 	ret = rk818_read_charge_full(ch, &full);
+ 	if (ret)
+ 		return ret;
+@@ -541,6 +575,11 @@ static int rk818_bat_status(struct rk818_charger *ch, int *status)
+ 	bool plugged;
+ 	int ret;
+ 
++	if (READ_ONCE(ch->dead)) {
++		*status = POWER_SUPPLY_STATUS_DISCHARGING;
++		return 0;
++	}
++
+ 	ret = rk818_plugged(ch, &plugged);
+ 	if (ret)
+ 		return ret;
+@@ -608,6 +647,11 @@ static int rk818_charge_now(struct rk818_charger *ch, int *uah)
+ 	int cnt, ret;
+ 
+ 	mutex_lock(&ch->lock);
++	if (ch->dead) {
++		mutex_unlock(&ch->lock);
++		*uah = 0;
++		return 0;
++	}
+ 	ret = rk818_read_gascnt(ch, &cnt);
+ 	mutex_unlock(&ch->lock);
+ 	if (ret)
+@@ -621,6 +665,11 @@ static int rk818_capacity(struct rk818_charger *ch, int *cap)
+ {
+ 	int now, full, uv, ret;
+ 
++	if (READ_ONCE(ch->dead)) {
++		*cap = 0;
++		return 0;
++	}
++
+ 	ret = rk818_charge_now(ch, &now);
+ 	if (ret) {
+ 		/* Fall back to the voltage when the counter cannot be read */
+@@ -792,13 +841,36 @@ static void rk818_monitor_work(struct work_struct *work)
+ 		dev_err_ratelimited(ch->dev, "input current update failed: %d\n", ret);
+ 
+ 	mutex_lock(&ch->lock);
++	if (ch->dead) {
++		mutex_unlock(&ch->lock);
++		goto notify;
++	}
++
+ 	ret = rk818_gauge_update(ch);
+-	if (ret)
++	if (ret == -ESHUTDOWN) {
++		/* Empty: the next boot must not trust the old counter */
+ 		ch->neg_cnt = false;
+-	mutex_unlock(&ch->lock);
++		ch->dead = true;
++		ret = 0;
++		if (lowv_test_uv <= 0) {
++			ret = rk818_write_gascnt(ch, 0);
++			if (!ret)
++				ret = rk818_save_gauge(ch, 0, ch->design_uah);
++		}
++		mutex_unlock(&ch->lock);
++		__hw_protection_trigger("RK818 battery voltage too low",
++					RK818_SHUTDOWN_MS, HWPROT_ACT_SHUTDOWN);
++	} else {
++		if (ret) {
++			ch->neg_cnt = false;
++			ch->low_volt = false;
++		}
++		mutex_unlock(&ch->lock);
++	}
+ 	if (ret)
+ 		dev_err_ratelimited(ch->dev, "fuel gauge update failed: %d\n", ret);
+ 
++notify:
+ 	power_supply_changed(ch->bat);
+ 	power_supply_changed(ch->ac);
+ 	power_supply_changed(ch->usb);
+@@ -868,6 +940,14 @@ static irqreturn_t rk818_plug_irq(int irq, void *data)
+ 	return IRQ_HANDLED;
+ }
+ 
++static irqreturn_t rk818_vb_low_irq(int irq, void *data)
++{
++	struct rk818_charger *ch = data;
++
++	mod_delayed_work(system_freezable_wq, &ch->work, 0);
++	return IRQ_HANDLED;
++}
++
+ static int rk818_cable_changed(struct notifier_block *nb, unsigned long event,
+ 			       void *ptr)
+ {
+@@ -938,6 +1018,15 @@ static void rk818_put_node(void *np)
+ 	of_node_put(np);
+ }
+ 
++static void rk818_disable_wakeup(void *data)
++{
++	struct device *dev = data;
++
++	dev_pm_clear_wake_irq(dev);
++	device_wakeup_disable(dev);
++	device_set_wakeup_capable(dev, false);
++}
++
+ static int rk818_read_calibration(struct rk818_charger *ch)
+ {
+ 	__be16 raw0, raw1;
+@@ -1061,7 +1150,7 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 	struct power_supply_config cfg = {};
+ 	struct device *dev = &pdev->dev;
+ 	struct rk818_charger *ch;
+-	int irq_in, irq_out, ret;
++	int irq_in, irq_out, irq_low, ret;
+ 
+ 	ch = devm_kzalloc(dev, sizeof(*ch), GFP_KERNEL);
+ 	if (!ch)
+@@ -1108,6 +1197,12 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	ch->shutdown_uv = ch->vmin_uv;
++	if (lowv_test_uv > 0) {
++		ch->shutdown_uv = lowv_test_uv;
++		dev_warn(dev, "testing: low battery shutdown at %d uV\n", lowv_test_uv);
++	}
++
+ 	ret = rk818_charger_init(ch);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to initialize charger\n");
+@@ -1147,6 +1242,9 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 	irq_out = platform_get_irq(pdev, 1);
+ 	if (irq_out < 0)
+ 		return irq_out;
++	irq_low = platform_get_irq(pdev, 2);
++	if (irq_low < 0)
++		return irq_low;
+ 
+ 	ret = devm_request_threaded_irq(dev, irq_in, NULL, rk818_plug_irq,
+ 					IRQF_ONESHOT, "rk818-plug-in", ch);
+@@ -1158,6 +1256,25 @@ static int rk818_charger_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to request plug-out IRQ\n");
+ 
++	ret = devm_request_threaded_irq(dev, irq_low, NULL, rk818_vb_low_irq,
++					IRQF_ONESHOT, "rk818-vb-low", ch);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request low-voltage IRQ\n");
++
++	device_set_wakeup_capable(dev, true);
++	ret = device_wakeup_enable(dev);
++	if (ret)
++		return ret;
++	ret = dev_pm_set_wake_irq(dev, irq_low);
++	if (ret) {
++		device_wakeup_disable(dev);
++		device_set_wakeup_capable(dev, false);
++		return dev_err_probe(dev, ret, "failed to set low-voltage wake IRQ\n");
++	}
++	ret = devm_add_action_or_reset(dev, rk818_disable_wakeup, dev);
++	if (ret)
++		return ret;
++
+ 	queue_delayed_work(system_freezable_wq, &ch->work, 0);
+ 	dev_info(dev, "RK818 battery monitor initialized\n");
+ 	return 0;
+@@ -1167,6 +1284,15 @@ static int rk818_charger_suspend(struct device *dev)
+ {
+ 	struct rk818_charger *ch = dev_get_drvdata(dev);
+ 
++	mutex_lock(&ch->lock);
++	if (ch->dead) {
++		mutex_unlock(&ch->lock);
++		return -EBUSY;
++	}
++	ch->neg_cnt = false;
++	ch->low_volt = false;
++	mutex_unlock(&ch->lock);
++
+ 	return rk818_update(ch->regmap, RK818_USB_CTRL_REG, RK818_ILIM_SEL_MASK, 0);
+ }
+ 

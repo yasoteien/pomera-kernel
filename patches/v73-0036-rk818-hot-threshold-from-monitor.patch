@@ -1,0 +1,129 @@
+From 270cdcd4c12d8d7259e3f4aafb15ae6512558f66 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 19:02:57 +0900
+Subject: [PATCH] power: supply: rk818: Set the hot threshold from the monitor
+ too
+
+After a PMIC reset the first TS1 reading may not be there within the
+20 ms the init waits (reads at 0, 10 and 20 ms), and the threshold was
+then left off until the next resume, or for good on a system that is
+never suspended. Let the monitor (every 5 s) set it while it is off and
+the ADC has a reading.
+
+Also call off a suspend under way when VB_LO is raised after the
+suspend check has passed, with a hard wakeup event: a plain one aborts
+a suspend only when user space uses /sys/power/wakeup_count, which
+systemd does not. The abort flag is cleared when the next suspend
+starts freezing tasks, so a VB_LO while awake does not stop it.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/power/supply/rk818_charger.c | 53 ++++++++++++++++++++++++----
+ 1 file changed, 47 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index 0efb75f82a07..4790a8a79eee 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -1178,6 +1178,8 @@ static void rk818_led_work(struct work_struct *work)
+ 			   msecs_to_jiffies(RK818_LED_MS));
+ }
+ 
++static int rk818_set_hot_threshold(struct rk818_charger *ch);
++
+ static void rk818_monitor_work(struct work_struct *work)
+ {
+ 	struct rk818_charger *ch = container_of(to_delayed_work(work),
+@@ -1186,6 +1188,8 @@ static void rk818_monitor_work(struct work_struct *work)
+ 
+ 	mutex_lock(&ch->ilim_lock);
+ 	ret = rk818_update_input(ch);
++	if (rk818_set_hot_threshold(ch))
++		dev_err_ratelimited(ch->dev, "hot battery threshold not set\n");
+ 	mutex_unlock(&ch->ilim_lock);
+ 	if (ret)
+ 		dev_err_ratelimited(ch->dev, "input current update failed: %d\n", ret);
+@@ -1286,6 +1290,36 @@ static int rk818_cc_sel(int ua)
+ 	return (ua - 1000000) / 200000;
+ }
+ 
++/*
++ * Set the hot battery threshold if the TS1 ADC has a reading; with no
++ * reading yet (0) leave it off, as the PMIC would take 0 as hot. The
++ * monitor calls this again while the threshold is off. Under ilim_lock,
++ * or before the works start.
++ */
++static int rk818_set_hot_threshold(struct rk818_charger *ch)
++{
++	unsigned int hts;
++	__be16 ts1;
++	int ret;
++
++	ret = regmap_read(ch->regmap, RK818_BAT_HTS_TS1_REG, &hts);
++	if (ret || hts == RK818_BAT_HTS_TS1_VAL)
++		return ret;
++	ret = regmap_bulk_read(ch->regmap, RK818_TS1_ADC_REGH, &ts1, sizeof(ts1));
++	if (ret)
++		return ret;
++	if (!be16_to_cpu(ts1)) {
++		if (hts)
++			ret = rk818_update(ch->regmap, RK818_BAT_HTS_TS1_REG, 0xff, 0);
++		return ret;
++	}
++	ret = rk818_update(ch->regmap, RK818_BAT_HTS_TS1_REG, 0xff,
++			   RK818_BAT_HTS_TS1_VAL);
++	if (!ret)
++		dev_info(ch->dev, "hot battery check on\n");
++	return ret;
++}
++
+ /* Also run on resume. The input limit starts at 450 mA. */
+ static int rk818_charger_init(struct rk818_charger *ch)
+ {
+@@ -1326,26 +1360,27 @@ static int rk818_charger_init(struct rk818_charger *ch)
+ 
+ 	/*
+ 	 * The TS1 ADC first: with a threshold set and no reading the
+-	 * charger could pause. Both reset to off with the PMIC. If the ADC
+-	 * has not given a reading yet (0), leave the threshold off.
++	 * charger could pause. Both reset to off with the PMIC. Give the
++	 * first conversion up to 20 ms (reads at 0, 10 and 20 ms); if there
++	 * is still no reading, the monitor sets the threshold later.
+ 	 */
+ 	ret = rk818_update(ch->regmap, RK818_ADC_CTRL_REG, RK818_ADC_TS1_EN,
+ 			   RK818_ADC_TS1_EN);
+ 	if (ret)
+ 		return ret;
+ 	for (i = 0; i < 3; i++) {
++		if (i)
++			msleep(10);
+ 		ret = regmap_bulk_read(ch->regmap, RK818_TS1_ADC_REGH, &ts1,
+ 				       sizeof(ts1));
+ 		if (ret)
+ 			return ret;
+ 		if (be16_to_cpu(ts1))
+ 			break;
+-		msleep(10);
+ 	}
+ 	if (!be16_to_cpu(ts1))
+-		dev_warn(ch->dev, "no battery temperature reading: hot battery check off\n");
+-	ret = rk818_update(ch->regmap, RK818_BAT_HTS_TS1_REG, 0xff,
+-			   be16_to_cpu(ts1) ? RK818_BAT_HTS_TS1_VAL : 0);
++		dev_warn(ch->dev, "no battery temperature reading yet: hot battery check later\n");
++	ret = rk818_set_hot_threshold(ch);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1380,6 +1415,12 @@ static irqreturn_t rk818_vb_low_irq(int irq, void *data)
+ 	mutex_lock(&ch->lock);
+ 	ch->vb_low = true;
+ 	mutex_unlock(&ch->lock);
++	/*
++	 * A suspend under way, past the check, is called off. A hard event:
++	 * a plain one only counts with /sys/power/wakeup_count in use. The
++	 * abort flag is cleared when the next suspend starts freezing.
++	 */
++	pm_wakeup_hard_event(ch->dev);
+ 	mod_delayed_work(system_freezable_wq, &ch->work, 0);
+ 	return IRQ_HANDLED;
+ }

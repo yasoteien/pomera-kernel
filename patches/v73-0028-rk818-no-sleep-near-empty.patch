@@ -1,0 +1,100 @@
+From e1966e46894f68af9338f49fec058e685220db75 Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:55:14 +0900
+Subject: [PATCH 28/30] power: supply: rk818: Do not sleep on a nearly empty
+ battery
+
+The PMIC wakes the system once when the battery falls to 3.5 V (VB_LO),
+which is above the 3.4 V minimum, and not again below it. Suspended on
+battery there, the system went back to sleep and discharged the battery
+past the minimum without a shutdown. Refuse suspend to idle or RAM on
+battery below the shutdown voltage plus 150 mV, so that the low battery
+shutdown can run. Hibernation saves the state and is still allowed.
+
+When the forced power-off after a low battery was cancelled because the
+battery recovered, the driver stayed marked dead: the voltage was no
+longer watched and suspend was refused for good. Clear the mark, so
+that a new low battery starts the shutdown again.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/power/supply/rk818_charger.c | 45 ++++++++++++++++++++++++++--
+ 1 file changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index 1c0a3339935a..793d91543728 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -99,6 +99,12 @@
+ /* Below the minimum voltage for this long, or 50 mV below it: power off */
+ #define RK818_LOW_VOLT_MS		60000
+ #define RK818_LOW_VOLT_MARGIN_UV	50000
++/*
++ * On battery, no suspend below the shutdown voltage plus this. The PMIC
++ * wakes the system once at 3.5 V (VB_LO) and not again below it, so a
++ * system suspended there would discharge the battery past the minimum.
++ */
++#define RK818_SUSPEND_MARGIN_UV		150000
+ /*
+  * After a low battery the orderly power-off gets this long; then the driver
+  * switches the PMIC off itself, after emergency_sync() and with one retry.
+@@ -1208,6 +1214,14 @@ static void rk818_off_work(struct work_struct *work)
+ 	    !rk818_low_battery(ch, uv, ua, mon & RK818_PLUG_IN_STS)) {
+ 		dev_emerg(ch->dev, "battery recovered (%d uV, %d uA): forced power-off cancelled\n",
+ 			  uv, ua);
++		/*
++		 * Watch the voltage again: the monitor still runs, and on a
++		 * new low battery it queues this work once more.
++		 */
++		mutex_lock(&ch->lock);
++		ch->dead = false;
++		ch->low_volt = false;
++		mutex_unlock(&ch->lock);
+ 		return;
+ 	}
+ 
+@@ -1689,6 +1703,27 @@ static int rk818_charger_suspend(struct device *dev)
+ 	return ret;
+ }
+ 
++/* Suspend to idle or RAM only: hibernation saves the state, so it is allowed */
++static int rk818_charger_suspend_sleep(struct device *dev)
++{
++	struct rk818_charger *ch = dev_get_drvdata(dev);
++	unsigned int mon;
++	int uv;
++
++	mutex_lock(&ch->lock);
++	if (!ch->dead && !rk818_read_voltage(ch, &uv) &&
++	    !regmap_read(ch->regmap, RK808_VB_MON_REG, &mon) &&
++	    !(mon & RK818_PLUG_IN_STS) &&
++	    uv < ch->shutdown_uv + RK818_SUSPEND_MARGIN_UV) {
++		mutex_unlock(&ch->lock);
++		dev_warn(dev, "battery nearly empty (%d uV): not suspending\n", uv);
++		return -EBUSY;
++	}
++	mutex_unlock(&ch->lock);
++
++	return rk818_charger_suspend(dev);
++}
++
+ static int rk818_charger_resume(struct device *dev)
+ {
+ 	struct rk818_charger *ch = dev_get_drvdata(dev);
+@@ -1706,8 +1741,14 @@ static int rk818_charger_resume(struct device *dev)
+ 	return 0;
+ }
+ 
+-static DEFINE_SIMPLE_DEV_PM_OPS(rk818_charger_pm, rk818_charger_suspend,
+-				rk818_charger_resume);
++static const struct dev_pm_ops rk818_charger_pm = {
++	.suspend = rk818_charger_suspend_sleep,
++	.resume = rk818_charger_resume,
++	.freeze = rk818_charger_suspend,
++	.thaw = rk818_charger_resume,
++	.poweroff = rk818_charger_suspend,
++	.restore = rk818_charger_resume,
++};
+ 
+ static struct platform_driver rk818_charger_driver = {
+ 	.probe = rk818_charger_probe,

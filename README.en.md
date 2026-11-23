@@ -1,5 +1,11 @@
 # pomera-kernel (Linux kernel for the Pomera DM250)
 
+> **This branch (`linux-7.3`) is under development. Do not use it.**
+> It carries the move to Linux 7.3, the next main line. The patches are `v73-00xx` (moved from 6.18, same numbers) and `v73-1xxx` (added for 7.3). `configs/dm250.config` is the 7.3 configuration and enables MGLRU (`CONFIG_LRU_GEN`).
+> - Linux 7.3 is expected to be the 2026 LTS (not designated yet), and Debian 14 (forky) is expected to use it. When Debian 14 is released, this branch will be merged into main and apt `stable` will ship 7.3. 7.3 also runs on Debian 13.
+> - The 6.18 line will no longer be maintained from that day (its last state stays as a tag).
+> - Until then the released line is 6.18 on main, and apt keeps installing 6.18.
+
 A Linux kernel for running Debian on the King Jim Pomera DM250 (Japanese model). It is Linux 6.18 LTS (kernel.org longterm) with patches for the DM250, shipped as Debian packages (.deb) from an apt repository and rebuilt once a week with the latest Linux 6.18 LTS release.
 
 - It follows kernel.org Linux 6.18 LTS. It does not follow the kernel updates of ichinomoto's image (it is built independently of the image's kernel).

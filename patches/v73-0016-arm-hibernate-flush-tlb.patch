@@ -1,0 +1,47 @@
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Subject: [PATCH] ARM: hibernate: Flush the TLB after switching to the identity mapping
+
+Switch to the identity mapping and flush the TLB, as __soft_restart()
+does. idmap_pgd was copied from init_mm before mark_rodata_ro(), so it
+still maps the kernel text and rodata writable, but global TLB
+entries left from the old page tables may still say read-only.
+Copying over such a page faults with IRQs off and the restore hangs.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+diff --git a/arch/arm/kernel/hibernate.c b/arch/arm/kernel/hibernate.c
+index 231a76af09a0..7304502b1569 100644
+--- a/arch/arm/kernel/hibernate.c
++++ b/arch/arm/kernel/hibernate.c
+@@ -21,7 +21,6 @@
+ #include <asm/suspend.h>
+ #include <asm/page.h>
+ #include <asm/sections.h>
+-#include <asm/uaccess.h>
+ #include "reboot.h"
+ 
+ int pfn_is_nosave(unsigned long pfn)
+@@ -84,15 +83,15 @@ static void notrace arch_restore_image(void *unused)
+ 	struct pbe *pbe;
+ 
+ 	/*
+-	 * With CONFIG_CPU_TTBR0_PAN enabled, TTBCR.EPD0 is set to block
+-	 * TTBR0 page-table walks.  The identity mapping used here lives at
+-	 * low (user-space) virtual addresses and is only reachable via
+-	 * TTBR0, so re-enable those walks before switching page tables.
+-	 * On non-PAN kernels this is a no-op.
++	 * Switch to the identity mapping and flush the TLB, as
++	 * __soft_restart() does.  idmap_pgd was copied from init_mm before
++	 * mark_rodata_ro(), so it still maps the kernel text and rodata
++	 * writable, but global TLB entries left from the old page tables may
++	 * still say read-only.  Copying over such a page faults with IRQs off
++	 * and the restore hangs.  setup_mm_for_reboot() also re-enables the
++	 * TTBR0 page-table walks with CONFIG_CPU_TTBR0_PAN.
+ 	 */
+-	if (IS_ENABLED(CONFIG_CPU_TTBR0_PAN))
+-		uaccess_save_and_enable();
+-	cpu_switch_mm(idmap_pgd, &init_mm);
++	setup_mm_for_reboot();
+ 	for (pbe = restore_pblist; pbe; pbe = pbe->next)
+ 		copy_page(pbe->orig_address, pbe->address);
+ 
