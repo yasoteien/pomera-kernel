@@ -1,6 +1,6 @@
 # pomera-kernel (Linux kernel for the Pomera DM250)
 
-> **This branch (`linux-7.3`) is under development. Do not use it.**
+> **This branch (`linux-7.3`) is under development. General users should not use it.** If you can build kernels yourself, you can try it: as of Linux 7.3.5 (7.3.5-v73d) it passes the same tests as the 6.18 line (trial boot, confirm, hibernate, rollback, SD and Wi-Fi load together, suspend, poweroff, keys, low-battery shutdown). No built .deb is published; build it yourself with `scripts/stable.sh` and the rest.
 > It carries the move to Linux 7.3, the next main line. The patches are `v73-00xx` (moved from 6.18, same numbers) and `v73-1xxx` (added for 7.3). `configs/dm250.config` is the 7.3 configuration and enables MGLRU (`CONFIG_LRU_GEN`).
 > - Linux 7.3 is expected to be the 2026 LTS (not designated yet), and Debian 14 (forky) is expected to use it. When Debian 14 is released, this branch will be merged into main and apt `stable` will ship 7.3. 7.3 also runs on Debian 13.
 > - The 6.18 line will no longer be maintained from that day (its last state stays as a tag).
