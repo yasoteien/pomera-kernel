@@ -4,6 +4,18 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Vers
 
 **Test release: no warranty, use at your own risk.** Unofficial, with nothing to do with King Jim or with the DM250 Debian 13 image published by ichinomoto at ekesete.net (https://www.ekesete.net/log/?p=9565) ("the image" below). Make a copy of the SD card before installing (see Disclaimer in the README).
 
+## [2026.11.24.1] - 2026-11-24
+
+Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-upgrade` or `full-upgrade`). The next boot tries the new kernel once and confirms it if healthy.
+
+### Changed
+
+- Follow Linux 6.18 LTS from 6.18.64 to 6.18.65 (`pomera-kernel-6.18.65-wk20261124b`), including fixes to IPv4 fragment reassembly, mm, Bluetooth, Wi-Fi (mac80211, cfg80211), USB audio (UAC2 mixers) and ARM (e.g. CVE-2026-99709).
+- Power-off: 6.18.65 moves the RK818 power-off write to the last power-off step. The kernel follows that and also keeps the write in the earlier step that has switched the DM250 off so far (DM250 patch 0037).
+- `pomera-kernel-tools` 0.9: a way to install it while building an SD image (`pomera-kernel image-init`). On the device it works as 0.8.
+- The user and host names of the kernel build are fixed (`/proc/version` shows `pomera@kbuild`).
+- U-Boot (`dm250.8`) is the same as in the previous release.
+
 ## [2026.11.18] - 2026-11-18
 
 Upgrade with `sudo apt update && sudo apt upgrade` (with `apt-get`, use `dist-upgrade` or `full-upgrade`). The next boot tries the new kernel once and confirms it if healthy.

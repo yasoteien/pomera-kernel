@@ -1,0 +1,102 @@
+From 64e26a46d824ff18ed59cfd0af4a322268aacc9e Mon Sep 17 00:00:00 2001
+From: yasoteien <263659156+yasoteien@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 16:07:36 +0900
+Subject: [PATCH] mfd: rk8xx: Also set DEV_OFF in the power-off prepare step
+
+Since "mfd: rk8xx: Register poweroff handler in atomic phase" (6.18.65),
+rk808_power_off() runs only in the final power-off step, after
+smp_send_stop() and with interrupts off. The I2C transfer there uses the
+polling path of i2c-rk3x, but the regmap lock is a mutex: if another CPU
+was stopped while it held the lock (the RK818 charger monitor reads the
+PMIC every few seconds and has no .shutdown), the write cannot be done
+and the board is left to the watchdog, or stays on.
+
+Register rk808_power_off() for the prepare step as well, as before
+6.18.65. There the other CPUs still run, the lock is released and the
+transfer may sleep; this is the path that switched the Pomera DM250 off
+in every test until 6.18.64. The write in the final step stays as a
+fallback for boards where the prepare step cannot reach the PMIC (the
+Veyron case of the upstream change). The wait handler added by
+"Register a final power-off handler so that poweroff does not halt"
+still runs last, since rk808_power_off() returns right after the write.
+
+Also update the comments that described the old order.
+
+Signed-off-by: yasoteien <263659156+yasoteien@users.noreply.github.com>
+---
+ drivers/mfd/rk8xx-core.c             | 31 +++++++++++++++++++++-------
+ drivers/power/supply/rk818_charger.c |  9 ++++----
+ 2 files changed, 28 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/mfd/rk8xx-core.c b/drivers/mfd/rk8xx-core.c
+index 3e955b5c9..f32bd7dab 100644
+--- a/drivers/mfd/rk8xx-core.c
++++ b/drivers/mfd/rk8xx-core.c
+@@ -656,9 +656,10 @@ static int rk808_power_off(struct sys_off_data *data)
+ }
+ 
+ /*
+- * The supplies are switched off in the prepare step, where the I2C bus may
+- * still sleep. This handler only waits for that to take effect, so that
+- * machine_power_off() does not return while the PMIC is still on.
++ * rk808_power_off() sets DEV_OFF and returns at once. This handler runs
++ * after it in the final power-off step and only waits for the supplies to
++ * drop, so that machine_power_off() does not return while the PMIC is
++ * still on.
+  */
+ #define RK8XX_POWER_OFF_WAIT_MS		5000
+ 
+@@ -837,10 +838,26 @@ int rk8xx_probe(struct device *dev, int variant, unsigned int irq, struct regmap
+ 					     "failed to register poweroff handler\n");
+ 
+ 		/*
+-		 * Without a handler for the final power-off step,
+-		 * kernel_can_power_off() is false when nothing else (PSCI,
+-		 * gpio-poweroff, ...) can power off, and reboot(POWER_OFF)
+-		 * is turned into a halt with the PMIC still on.
++		 * Also set DEV_OFF in the prepare step, where the other CPUs
++		 * still run and the I2C transfer may sleep. In the final step
++		 * the other CPUs are stopped; if one was stopped while holding
++		 * the regmap lock (the charger monitor reads the PMIC every
++		 * few seconds), the write there cannot be done. The write in
++		 * the final step stays as a fallback for boards where the
++		 * prepare step cannot reach the PMIC.
++		 */
++		ret = devm_register_sys_off_handler(dev,
++				    SYS_OFF_MODE_POWER_OFF_PREPARE, SYS_OFF_PRIO_HIGH,
++				    &rk808_power_off, rk808);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to register poweroff prepare handler\n");
++
++		/*
++		 * rk808_power_off() returns right after the I2C write. Wait
++		 * here, or reboot(POWER_OFF) goes on to do_exit() and the
++		 * hw_protection fallback to emergency_restart() while the
++		 * PMIC is still switching off.
+ 		 */
+ 		ret = devm_register_sys_off_handler(dev,
+ 				    SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_LOW,
+diff --git a/drivers/power/supply/rk818_charger.c b/drivers/power/supply/rk818_charger.c
+index 4790a8a79..7d200c230 100644
+--- a/drivers/power/supply/rk818_charger.c
++++ b/drivers/power/supply/rk818_charger.c
+@@ -1242,11 +1242,10 @@ static void rk818_monitor_work(struct work_struct *work)
+ 
+ /*
+  * The forced step of the low battery power-off. The kernel's own one
+- * (hw_failure_emergency_action_func) calls kernel_power_off(), which always
+- * returns on this board: the RK818 is switched off in the power-off prepare
+- * step and nothing handles the final step. It then restarts the system
+- * at once. Here DEV_OFF is set directly instead, unless the battery is no
+- * longer low by the same test that started the power-off.
++ * (hw_failure_emergency_action_func) calls kernel_power_off(), and if that
++ * returns it restarts the system at once, which can win against the
++ * PMIC switching off. Here DEV_OFF is set directly instead, unless the
++ * battery is no longer low by the same test that started the power-off.
+  */
+ static void rk818_off_work(struct work_struct *work)
+ {
+-- 
+2.47.3
+

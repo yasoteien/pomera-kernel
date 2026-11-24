@@ -11,6 +11,8 @@
 #   pomera-kernel boot-trial          （pomera-kernel-trial.service）待っている版があれば watchdog を動かして kexec する
 #   pomera-kernel confirm             （pomera-kernel-confirm.service）試しの起動が正常なら組を SD に書いて確定する
 #   pomera-kernel rollback            退避した組（prev）と今の組を入れ替える（次の起動から前の組。もう一度流せば戻る）
+#   pomera-kernel image-init <版>     （SD のイメージを組む時だけ。POMERA_IMAGE_BUILD=1 で /proc/device-tree が無い時）
+#                                     <版> が組 0 に入っている事を記録する（current と keep）。試す予定（pending）は作らない
 #   pomera-kernel keep                apt の autoremove が消さない版（今の組・1 つ前の組・動いている版・待っている版）を
 #                                     /etc/apt/apt.conf.d/01pomera-kernel-autoremove に書き直す（stage・confirm・rollback の後にも流れる）
 #
@@ -282,10 +284,10 @@ KEEP_CONF=/etc/apt/apt.conf.d/01pomera-kernel-autoremove
 # apt の autoremove が消さない版を書く（2026-11-04 のユーザーの決定: 古い版は autoremove、今の版と 1 つ前は残す）。
 # 今の組（次の起動の組）・1 つ前の組（prev）・動いている版・待っている版のうち、入っているパッケージの物だけ。
 # Debian の linux-image の 01autoremove-kernels と同じ APT::NeverAutoRemove の形。
-write_keep() {
+write_keep() {  # 0.9: 引数で版を足せる（image-init が、まだ動いていない組 0 の版を残すため）。引数なしは今までどおり
 	local v vs=() t
 	for v in "$(boot_pair 2>/dev/null || true)" "$(prev_name 2>/dev/null || true)" \
-		"$(uname -r)" "$(cat "$VAR/pending" 2>/dev/null || true)"; do
+		"$(uname -r)" "$(cat "$VAR/pending" 2>/dev/null || true)" "$@"; do
 		[[ "$v" =~ ^6\.18\.[0-9]+-[a-z0-9]+$ ]] && [ -d "$LIB/$v" ] || continue
 		[[ " ${vs[*]} " == *" $v "* ]] || vs+=("$v")
 	done
@@ -593,6 +595,15 @@ stage)
 	;;
 unstage) rm -f "$VAR/pending"; write_keep; log "試す予定を取り消した" ;;
 keep) write_keep ;;
+image-init)
+	# SD のイメージを組む時だけ（docs/IMAGE_PLAN.md §5.8）。実機の上では断る
+	[ "${POMERA_IMAGE_BUILD:-}" = 1 ] && [ ! -e /proc/device-tree ] ||
+		die "image-init はイメージの組み立ての時だけ（POMERA_IMAGE_BUILD=1 で /proc/device-tree が無い時）"
+	V=${2:?版}; valid_ver "$V"; check_set "$V"
+	rm -f "$VAR/pending" "$VAR/trying" "$VAR/writing" "$VAR/failed-$V" "$VAR/interrupted-$V"
+	echo "$V" > "$VAR/current"; write_keep "$V"
+	log "$V を組 0 の版として記録した（試す予定は作らない）"
+	;;
 boot-trial)
 	# 試しの起動の中では何もしない（confirm の出番）
 	grep -q 'pomera\.trial=' /proc/cmdline && exit 0

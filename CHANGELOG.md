@@ -4,6 +4,18 @@
 
 **試験版です。無保証で、使うのは自己責任です。** キングジム、および ichinomoto 氏が ekesete.net（https://www.ekesete.net/log/?p=9565）で公開されている DM250 用 Debian 13 イメージ（以下「イメージ」）とは関係のない、非公式の物です。入れる前に SD カードの写しを取ってください（README の「免責」）。
 
+## [2026.11.24.1] - 2026-11-24
+
+上げ方: `sudo apt update && sudo apt upgrade`（`apt-get` なら `dist-upgrade` か `full-upgrade`）。次の起動で新しい版を 1 回だけ試し、正常なら確定します。
+
+### 変更
+
+- Linux 6.18 LTS の 6.18.64 → 6.18.65 に追従（`pomera-kernel-6.18.65-wk20261124b`）。IPv4 の断片の再構成、mm、Bluetooth、Wi-Fi（mac80211・cfg80211）、USB オーディオ（UAC2 のミキサー）、ARM の修正を含む（例: CVE-2026-99709）。
+- 電源を切る処理: 6.18.65 で RK818 の電源断の書き込みが電源断の最後の段に移ったので、それに合わせつつ、これまで切れていた手前の段での書き込みも残した（DM250 用のパッチ 0037）。
+- `pomera-kernel-tools` を 0.9 に上げた。SD イメージを組む時だけ使う入れ方（`pomera-kernel image-init`）を足した。実機での動きは 0.8 と同じ。
+- カーネルの組み立ての利用者名と機械名を固定した（`/proc/version` は `pomera@kbuild`）。
+- U-Boot（`dm250.8`）は前の版と同じ。
+
 ## [2026.11.18] - 2026-11-18
 
 上げ方: `sudo apt update && sudo apt upgrade`（`apt-get` なら `dist-upgrade` か `full-upgrade`）。次の起動で新しい版を 1 回だけ試し、正常なら確定します。

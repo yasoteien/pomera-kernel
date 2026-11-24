@@ -143,6 +143,9 @@ mkdir -p "$OBJ"
 echo "$BR" > "$OBJ/.branch"
 echo "O=: $OBJ"
 
+# 版の文字（/proc/version）に組んだ機械の名前が入らないよう、組んだ人と機械を固定する（2026-11-23、
+# それまで組んだ機械のアカウントと名前が入って公開されていた）。呼ぶ側が値を渡せばそれを使う（sha の突き合わせ用）
+export KBUILD_BUILD_USER=${KBUILD_BUILD_USER:-pomera} KBUILD_BUILD_HOST=${KBUILD_BUILD_HOST:-kbuild}
 # 設定。版の印（LV）は CONFIG_LOCALVERSION でなく make の LOCALVERSION= で渡す（.config を版ごとに
 # 変えない）。LOCALVERSION を渡すと、git の木でも版の名前に「+」は付かない（scripts/setlocalversion）
 M=(make -C "$GIT" O="$OBJ" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- LOCALVERSION="$LV")
@@ -168,6 +171,12 @@ echo "設定の差（configs/dm250.config からの）: $TOP/config-new-$NAME.tx
 tail -1 "$LOG"
 grep -q '^EXIT=0$' "$LOG"
 R=$(cat "$OBJ/include/config/kernel.release")
+# 版の文字に組んだ機械の名前が入っていない事を確かめる（2026-11-23。それまで公開の版に組んだ機械の名前が入っていた）
+CB=$(sed -n "s/^#define LINUX_COMPILE_BY[[:space:]]*\"\(.*\)\"/\1/p" "$OBJ/include/generated/compile.h")
+CH=$(sed -n "s/^#define LINUX_COMPILE_HOST[[:space:]]*\"\(.*\)\"/\1/p" "$OBJ/include/generated/compile.h")
+if [ "$CB@$CH" != "$KBUILD_BUILD_USER@$KBUILD_BUILD_HOST" ]; then
+	echo "版の文字の組んだ人・機械が想定と違う: $CB@$CH（期待 $KBUILD_BUILD_USER@$KBUILD_BUILD_HOST）" >&2; exit 1
+fi
 echo "版の名前: $R"
 
 if [ -n "$KEEP" ]; then

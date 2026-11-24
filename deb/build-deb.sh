@@ -233,7 +233,10 @@ cat > "$I/DEBIAN/postinst" <<EOF
 set -e
 if [ "\$1" = configure ]; then
 	depmod -a $V
-	if pomera-kernel stage $V; then
+	# 0.9: SD のイメージを組む時（組み立て用の印があり、/proc/device-tree が無い）は試す予定を作らない。組 0 への記録は pomera-kernel image-init
+	if [ "\${POMERA_IMAGE_BUILD:-}" = 1 ] && [ ! -e /proc/device-tree ]; then
+		echo "pomera-kernel: イメージの組み立てなので $V を試す予定は作らない（pomera-kernel image-init $V で組 0 に記録する）" >&2
+	elif pomera-kernel stage $V; then
 		:  # 試す予定を作ったか、もう入っているかは stage が書く
 	else
 		echo "pomera-kernel: $V は置きました。試すには pomera-kernel stage $V" >&2

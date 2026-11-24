@@ -14,6 +14,12 @@ write_preinst() {
 set -e
 # 保証できるのは DM250 の日本版だけ。動いている DT の model と compatible が、並べた物と完全に一致した時だけ入れる
 case "\$1" in install|upgrade)
+	# 0.9: SD のイメージを組む時だけ（組み立て用の印があり、かつ /proc/device-tree が無い＝実機ではない）、機種の判定を飛ばす。
+	# 実機の上では、印があっても飛ばさない（docs/IMAGE_PLAN.md §5.8）
+	if [ "\${POMERA_IMAGE_BUILD:-}" = 1 ] && [ ! -e /proc/device-tree ]; then
+		echo "$2: イメージの組み立て（POMERA_IMAGE_BUILD=1、/proc/device-tree が無い）なので、機種の判定を飛ばす" >&2
+		exit 0
+	fi
 	model=\$( { tr -d '\\000' < /proc/device-tree/model; } 2>/dev/null || true)
 	compat=\$( { tr '\\000' ' ' < /proc/device-tree/compatible; } 2>/dev/null | sed 's/ \$//' || true)
 	if [ "\$model" = "$POMERA_OK_MODEL" ] && [ "\$compat" = "$POMERA_OK_COMPAT" ]; then
